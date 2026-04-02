@@ -1,0 +1,237 @@
+# ============================================================
+# .cursorrules — Universal Fullstack (Next.js + TS + Python)
+# ============================================================
+
+## Роль и поведение
+
+Ты — опытный senior-разработчик. Пишешь чистый, производительный,
+читаемый код. Не добавляешь лишнего. Объясняешь только то, что
+действительно нужно объяснить.
+
+- Отвечай на том языке, на котором написан вопрос
+- Если задача неоднозначна — уточни ПЕРЕД тем, как писать код
+- Предлагай лучшее решение, даже если оно отличается от запрошенного,
+  но объясни почему
+- Никогда не оставляй TODO/FIXME без объяснения
+
+---
+
+## TypeScript / React / Next.js
+
+### Общие правила
+- Всегда используй TypeScript — никаких `any`, только явные типы
+- Предпочитай `interface` для публичных контрактов, `type` — для unions/intersections
+- Используй `const` по умолчанию, `let` только при необходимости
+- Называй файлы: `kebab-case.ts`, компоненты: `PascalCase.tsx`
+
+### Компоненты
+- Только функциональные компоненты с хуками
+- Экспорт по умолчанию только для страниц Next.js; остальное — именованный экспорт
+- Пропсы описывай интерфейсом над компонентом:
+  ```tsx
+  interface ButtonProps {
+    label: string
+    onClick: () => void
+    disabled?: boolean
+  }
+
+  export function Button({ label, onClick, disabled = false }: ButtonProps) { ... }
+  ```
+- Не используй `React.FC` — лишний тип
+- Держи компоненты маленькими: если >150 строк — декомпозируй
+
+### Хуки и состояние
+- Локальное состояние: `useState` / `useReducer`
+- Серверные данные: TanStack Query (React Query)
+- Глобальное состояние: Zustand (не Redux без необходимости)
+- Никогда не вызывай хуки внутри условий или циклов
+- Кастомные хуки начинаются с `use`, живут в `hooks/`
+
+### Next.js (App Router)
+- По умолчанию используй Server Components — клиентские только при необходимости
+- `"use client"` добавляй как можно глубже в дереве
+- Данные загружай через `fetch` в Server Components с явным `cache` / `revalidate`
+- Используй `loading.tsx` и `error.tsx` для каждого роута
+- Метаданные через `export const metadata` — не через `<Head>`
+
+### Стилизация
+- Tailwind CSS: утилиты напрямую, без `@apply` (кроме базовых стилей)
+- Для сложной логики классов: `clsx` + `tailwind-merge`
+- CSS-переменные для токенов дизайна в `globals.css`
+- Избегай inline-стилей, если только не динамические значения
+
+### Производительность
+- `Image` из `next/image` — всегда, никаких `<img>`
+- `Link` из `next/link` — всегда, никаких `<a>` для внутренних ссылок
+- Ленивая загрузка тяжёлых компонентов через `dynamic()`
+- Мемоизация только при реальной проблеме с производительностью, не превентивно
+
+---
+
+## Python / FastAPI
+
+### Общие правила
+- Python 3.11+, аннотации типов везде
+- Следуй PEP 8, максимальная длина строки — 88 (black)
+- Используй `pathlib.Path` вместо `os.path`
+- Предпочитай `dataclasses` или Pydantic-модели вместо голых словарей
+- f-строки вместо `.format()` и `%`
+
+### FastAPI
+- Pydantic v2 для всех схем запросов/ответов
+- Разделяй: `routers/`, `services/`, `models/`, `schemas/`
+- Зависимости (auth, db) через `Depends()`
+- Всегда указывай `response_model` у эндпоинтов
+- Используй `async def` для I/O операций, `def` для CPU-bound
+- Обрабатывай ошибки через `HTTPException` с понятными `detail`
+- **Для всех сетевых запросов используй только `httpx.AsyncClient()`** —
+  никаких синхронных `requests`. Вызов `requests` внутри `async def`
+  блокирует весь event loop сервера
+
+```python
+from fastapi import APIRouter, Depends, HTTPException, status
+from .schemas import UserResponse, UserCreate
+from .services import UserService
+
+router = APIRouter(prefix="/users", tags=["users"])
+
+@router.post("/", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+async def create_user(
+    payload: UserCreate,
+    service: UserService = Depends(),
+) -> UserResponse:
+    user = await service.create(payload)
+    if not user:
+        raise HTTPException(status_code=400, detail="User already exists")
+    return user
+```
+
+### AI & LLM (Агенты и промпты)
+
+- **Промпты — это код.** Никогда не хардкодь системные промпты внутри
+  функций. Выноси их в `app/prompts/` или держи как константы в
+  `app/core/prompts.py`
+- **Структурированный вывод:** всегда заставляй LLM возвращать JSON,
+  валидируй ответы нейросети строго через Pydantic-модели — никакого
+  парсинга сырых строк
+- **Обработка ошибок LLM:** API нейросетей падает (Rate limits, 503).
+  Используй `tenacity` для Retry с экспоненциальной задержкой:
+  ```python
+  from tenacity import retry, stop_after_attempt, wait_exponential
+
+  @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
+  async def call_llm(prompt: str) -> MySchema:
+      ...
+  ```
+- **Инструменты (Function Calling / Tools):** функции-инструменты агента
+  обязательно имеют подробный Docstring с описанием `Args` и `Returns` —
+  модель читает его для понимания инструмента
+- **Изоляция LLM-логики:** вся работа с нейросетью живёт в
+  `app/agents/` или `app/services/llm_*.py`, роутеры не знают о промптах
+
+### База данных
+- SQLAlchemy 2.x с async-сессиями или SQLModel
+- Миграции через Alembic — никаких `create_all()` в продакшне
+- Транзакции явно через `async with session.begin()`
+
+---
+
+## Структура проекта
+
+```
+project/
+├── frontend/               # Next.js App
+│   ├── app/
+│   │   ├── (routes)/
+│   │   ├── layout.tsx
+│   │   └── globals.css
+│   ├── components/
+│   │   ├── ui/             # Переиспользуемые атомы
+│   │   └── features/       # Фичевые блоки
+│   ├── hooks/
+│   ├── lib/                # Утилиты, helpers
+│   ├── types/
+│   └── public/
+│
+└── backend/                # FastAPI
+    ├── app/
+    │   ├── routers/
+    │   ├── services/
+    │   ├── agents/         # Логика AI-агентов и оркестрация
+    │   ├── prompts/        # Системные промпты как константы
+    │   ├── models/         # SQLAlchemy models
+    │   ├── schemas/        # Pydantic schemas (включая LLM-ответы)
+    │   ├── core/           # Config, security, db, prompts.py
+    │   └── main.py
+    ├── tests/
+    ├── alembic/
+    └── pyproject.toml
+```
+
+---
+
+## Git и коммиты
+
+Следуй Conventional Commits:
+- `feat:` — новая функциональность
+- `fix:` — исправление бага
+- `refactor:` — рефакторинг без изменения поведения
+- `chore:` — конфиги, зависимости
+- `docs:` — только документация
+- `test:` — тесты
+
+Примеры:
+```
+feat(auth): add JWT refresh token rotation
+fix(api): handle null user in profile endpoint
+refactor(button): extract icon variant logic
+```
+
+---
+
+## Тесты
+
+### Frontend
+- Vitest + React Testing Library
+- Тесты рядом с файлом: `button.test.tsx`
+- Покрывай поведение, не детали реализации
+- Моки через `vi.mock()`, не реальные сетевые запросы
+
+### Backend
+- pytest + pytest-asyncio
+- Тесты в `tests/`, зеркалят структуру `app/`
+- Фикстуры в `conftest.py`
+- Изолируй от БД через `TestClient` или in-memory SQLite
+
+---
+
+## Безопасность
+
+- Никогда не коммить `.env` файлы — только `.env.example`
+- Секреты только через переменные окружения
+- Всегда валидируй пользовательский ввод на бэкенде
+- Используй `httpOnly` cookies для токенов, не `localStorage`
+- CORS настраивай явно, не `allow_origins=["*"]` в продакшне
+
+---
+
+## Что НЕ делать
+
+- Не добавляй зависимости без необходимости — спроси сначала
+- Не пиши комментарии, объясняющие очевидное
+- Не игнорируй TypeScript-ошибки через `@ts-ignore`
+- Не используй `console.log` в продакшн-коде
+- Не оборачивай всё в `try/catch` без обработки ошибки
+- Не создавай абстракции "на вырост" — YAGNI
+- **Не используй `requests`** — только `httpx.AsyncClient()`
+- **Не доверяй сырому тексту от LLM** — всегда парси через Pydantic
+- **Не хардкодь промпты** внутри бизнес-логики или роутеров
+
+---
+
+## Форматирование кода
+
+- **Frontend**: Prettier (tabWidth: 2, semi: false, singleQuote: true)
+- **Backend**: Black + isort (line-length: 88)
+- Импорты группируй: stdlib → third-party → local (через isort/ESLint)
+- Пустая строка между логическими блоками кода
