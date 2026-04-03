@@ -1,5 +1,9 @@
 requests
+httpx
 pydantic
 openai
 pandas
 openpyxl
+aiosqlite
+aiogram
+apscheduler
