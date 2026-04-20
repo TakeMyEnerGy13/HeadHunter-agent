@@ -1,21 +1,8 @@
-import json
-
 from openai import AsyncOpenAI
-from pydantic import ValidationError
 
+from app.agents.cover_letter_pipeline import run_cover_letter_pipeline
 from app.schemas.llm_schemas import CoverLetter
 from config import LLM_API_KEY, LLM_BASE_URL, MODEL_NAME
-
-SYSTEM_PROMPT = (
-    "Ты — IT-специалист, который пишет сопроводительное письмо для отклика на вакансию. "
-    "Твоя задача — написать живое, лаконичное и адекватное письмо (не более 3-4 небольших абзацев). "
-    "СТРОГИЕ ПРАВИЛА: "
-    "1. НИКОГДА не используй шаблонные фразы вроде 'Откликаюсь на позицию...', 'Прошу рассмотреть мое резюме на вакансию...' или 'С уважением, Имя'. "
-    "2. Начинай сразу с сути: почему твой опыт (из резюме) решает боли компании (из вакансии). "
-    "3. Пиши в инфостиле (Ильяхов), без воды и лизоблюдства. Тон спокойный, уверенный. "
-    "4. Не придумывай опыт, которого нет в резюме. Выделяй то, что пересекается с требованиями. "
-    "5. Верни ТОЛЬКО JSON-объект с полем 'text' (строка). Никакого лишнего текста до или после JSON."
-)
 
 
 class WriterAgentError(Exception):
@@ -39,38 +26,24 @@ class WriterAgent:
         self,
         vacancy_text: str,
         resume_text: str,
+        tone_samples: str = "",
+        preferences: str = "",
     ) -> CoverLetter:
-        user_prompt = (
-            "Вакансия:\n"
-            f"{vacancy_text}\n\n"
-            "Мое резюме:\n"
-            f"{resume_text}\n\n"
-            'Напиши живое сопроводительное письмо. Верни строго JSON: {"text": "текст письма"}'
-        )
-
         try:
-            response = await self.client.chat.completions.create(
+            text = await run_cover_letter_pipeline(
+                job_text=vacancy_text,
+                resume_text=resume_text,
+                tone_samples=tone_samples,
+                preferences=preferences,
+                base_url=str(self.client.base_url),
+                api_key=self.client.api_key,
                 model=self.model_name,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
-                response_format={"type": "json_object"},
             )
         except Exception as exc:
-            raise WriterAgentError(f"Ошибка запроса к LLM: {exc}") from exc
+            raise WriterAgentError(f"Ошибка пайплайна генерации письма: {exc}") from exc
 
-        content = response.choices[0].message.content if response.choices else None
-        if not content:
-            raise WriterAgentError("LLM не вернул текст письма")
+        if not text:
+            raise WriterAgentError("Пайплайн не вернул текст письма")
 
-        # ОЧИСТКА: Убираем маркдаун-кавычки
-        clean_content = content.replace("```json", "").replace("```", "").strip()
-
-        try:
-            parsed = json.loads(clean_content)
-            return CoverLetter.model_validate(parsed)
-        except (json.JSONDecodeError, ValidationError):
-            # Заплатка, если ИИ прислал просто текст
-            return CoverLetter(text=clean_content)
+        return CoverLetter(text=text)
 

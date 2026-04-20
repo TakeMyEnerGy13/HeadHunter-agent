@@ -2,6 +2,8 @@ requests
 httpx
 pydantic
 openai
+python-dotenv
+beautifulsoup4
 pandas
 openpyxl
 aiosqlite

@@ -58,6 +58,16 @@ async def clear_user_history(user_id: int):
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("DELETE FROM seen_vacancies WHERE user_id = ?", (user_id,))
         await db.commit()
+
+async def count_seen_vacancies(user_id: int) -> int:
+    """Сколько уникальных вакансий пользователь уже просматривал (всего в истории)."""
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM seen_vacancies WHERE user_id = ?",
+            (user_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return int(row[0]) if row else 0
 # ------------------------------------
 
 async def run_search_job(user_id: int):
@@ -70,6 +80,7 @@ async def run_search_job(user_id: int):
 
     resume_text = settings.get('resume_text')
     keywords = settings.get('keywords')
+    negative_keywords = settings.get('negative_keywords', [])
 
     if not resume_text or not keywords:
         await bot.send_message(user_id, "⚠️ Не могу начать поиск: не задано резюме или ключевые слова. Настрой их в меню!")
@@ -85,14 +96,23 @@ async def run_search_job(user_id: int):
     tg_notifier = TelegramNotifier(chat_id=str(user_id)) 
     
     try:
-        # 1. Получаем вакансии
-        vacancies = await hh_client.fetch_vacancies(keywords=keywords, max_pages=1)
+        # 1. Получаем вакансии: листаем страницы HH, пока не наберём «новых» (ещё не в seen_vacancies)
+        async def vacancy_already_seen(vacancy_id: str) -> bool:
+            return await is_vacancy_seen(user_id, vacancy_id)
+
+        vacancies = await hh_client.fetch_vacancies(
+            keywords=keywords,
+            negative_keywords=negative_keywords,
+            target_new_count=100,
+            is_already_seen=vacancy_already_seen,
+        )
         if not vacancies:
             await bot.send_message(user_id, "🤷‍♂️ По твоим ключам пока нет новых вакансий на HH.")
             return
 
         found_good = 0
         skipped = 0
+        unique_viewed_this_run: set[str] = set()
         
         # 2. Анализируем каждую
         for vac in vacancies:
@@ -135,10 +155,16 @@ async def run_search_job(user_id: int):
             
             # Отмечаем как просмотренную, чтобы больше не анализировать её в будущем
             await mark_vacancy_seen(user_id, vac_id)
+            unique_viewed_this_run.add(vac_id)
             
             # 3. Фильтруем и пишем письмо
             if analysis.match_score >= 60:
-                letter = await writer.generate_letter(vac_text, resume_text)
+                letter = await writer.generate_letter(
+                    vac_text,
+                    resume_text,
+                    tone_samples=settings.get("tone_samples", ""),
+                    preferences=settings.get("preferences", ""),
+                )
                 
                 # 4. Отправляем в Telegram
                 await tg_notifier.send_vacancy_alert(
@@ -151,7 +177,15 @@ async def run_search_job(user_id: int):
                 )
                 found_good += 1
         
-        await bot.send_message(user_id, f"✅ Поиск завершен!\nНовых крутых вакансий найдено: {found_good}\nПропущено старых: {skipped}")
+        total_unique_seen = await count_seen_vacancies(user_id)
+        await bot.send_message(
+            user_id,
+            "✅ Поиск завершен!\n"
+            f"Новых крутых вакансий найдено: {found_good}\n"
+            f"Уникальных вакансий просмотрено в этом поиске: {len(unique_viewed_this_run)}\n"
+            f"Всего уникальных в истории просмотров: {total_unique_seen}\n"
+            f"Пропущено старых: {skipped}",
+        )
         
     except Exception as e:
         err_trace = traceback.format_exc()

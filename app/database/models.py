@@ -13,28 +13,56 @@ async def init_db():
                 user_id INTEGER PRIMARY KEY,
                 resume_text TEXT,
                 keywords TEXT,
+                negative_keywords TEXT,
                 is_active BOOLEAN DEFAULT 0
             )
         '''
         )
+        # Мягкая миграция для уже существующей таблицы без negative_keywords.
+        try:
+            await db.execute("ALTER TABLE user_settings ADD COLUMN negative_keywords TEXT")
+        except aiosqlite.OperationalError:
+            pass
+        try:
+            await db.execute("ALTER TABLE user_settings ADD COLUMN tone_samples TEXT")
+        except aiosqlite.OperationalError:
+            pass
+        try:
+            await db.execute("ALTER TABLE user_settings ADD COLUMN preferences TEXT")
+        except aiosqlite.OperationalError:
+            pass
         await db.commit()
 
 
 async def get_user_settings(user_id: int):
     """Получает настройки пользователя."""
     async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT resume_text, keywords, is_active FROM user_settings WHERE user_id = ?", (user_id,)) as cursor:
+        async with db.execute(
+            "SELECT resume_text, keywords, negative_keywords, is_active, tone_samples, preferences FROM user_settings WHERE user_id = ?",
+            (user_id,),
+        ) as cursor:
             row = await cursor.fetchone()
             if row:
                 return {
                     "resume_text": row[0],
                     "keywords": json.loads(row[1]) if row[1] else [],
-                    "is_active": bool(row[2])
+                    "negative_keywords": json.loads(row[2]) if row[2] else [],
+                    "is_active": bool(row[3]),
+                    "tone_samples": row[4] or "",
+                    "preferences": row[5] or "",
                 }
             return None
 
 
-async def update_user_settings(user_id: int, resume_text: str = None, keywords: list = None, is_active: bool = None):
+async def update_user_settings(
+    user_id: int,
+    resume_text: str = None,
+    keywords: list = None,
+    negative_keywords: list = None,
+    is_active: bool = None,
+    tone_samples: str = None,
+    preferences: str = None,
+):
     """Обновляет или создает настройки пользователя."""
     async with aiosqlite.connect(DB_NAME) as db:
         # Проверяем, существует ли пользователь
@@ -51,9 +79,18 @@ async def update_user_settings(user_id: int, resume_text: str = None, keywords: 
             if keywords is not None:
                 updates.append("keywords = ?")
                 values.append(json.dumps(keywords))
+            if negative_keywords is not None:
+                updates.append("negative_keywords = ?")
+                values.append(json.dumps(negative_keywords))
             if is_active is not None:
                 updates.append("is_active = ?")
                 values.append(int(is_active))
+            if tone_samples is not None:
+                updates.append("tone_samples = ?")
+                values.append(tone_samples)
+            if preferences is not None:
+                updates.append("preferences = ?")
+                values.append(preferences)
 
             if updates:
                 values.append(user_id)
@@ -62,11 +99,12 @@ async def update_user_settings(user_id: int, resume_text: str = None, keywords: 
         else:
             # Создаем нового пользователя
             kw_json = json.dumps(keywords) if keywords else "[]"
+            negative_kw_json = json.dumps(negative_keywords) if negative_keywords else "[]"
             res_text = resume_text or ""
             active = int(is_active) if is_active is not None else 0
             await db.execute(
-                "INSERT INTO user_settings (user_id, resume_text, keywords, is_active) VALUES (?, ?, ?, ?)",
-                (user_id, res_text, kw_json, active)
+                "INSERT INTO user_settings (user_id, resume_text, keywords, negative_keywords, is_active) VALUES (?, ?, ?, ?, ?)",
+                (user_id, res_text, kw_json, negative_kw_json, active),
             )
         await db.commit()
 
@@ -76,7 +114,7 @@ async def get_active_settings():
     users = []
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute(
-            "SELECT user_id, resume_text, keywords, is_active FROM user_settings WHERE is_active = 1"
+            "SELECT user_id, resume_text, keywords, negative_keywords, is_active, tone_samples, preferences FROM user_settings WHERE is_active = 1"
         ) as cursor:
             rows = await cursor.fetchall()
             for row in rows:
@@ -85,7 +123,10 @@ async def get_active_settings():
                         "user_id": row[0],
                         "resume_text": row[1],
                         "keywords": json.loads(row[2]) if row[2] else [],
-                        "is_active": bool(row[3]),
+                        "negative_keywords": json.loads(row[3]) if row[3] else [],
+                        "is_active": bool(row[4]),
+                        "tone_samples": row[5] or "",
+                        "preferences": row[6] or "",
                     }
                 )
     return users

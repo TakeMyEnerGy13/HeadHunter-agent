@@ -7,7 +7,7 @@ load_dotenv()
 BASE_URL = "https://api.hh.ru/vacancies"
 
 DEFAULT_HEADERS = {
-    "User-Agent": "hh-agent/0.1 (+https://api.hh.ru)",
+    "User-Agent": os.getenv("HH_USER_AGENT", "hh-agent/0.2 (+https://github.com/TakeMyEnerGy13/HeadHunter-agent)"),
     "Accept": "application/json",
 }
 
@@ -17,4 +17,3 @@ MODEL_NAME = os.getenv("MODEL_NAME", "kr/claude-sonnet-4.5")
 
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID", "")
-
