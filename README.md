@@ -15,6 +15,8 @@ Telegram-бот, который помогает искать вакансии �
 - Учитывает пользовательский стиль письма: можно загрузить примеры своих текстов.
 - Учитывает предпочтения: например, писать короче, без официоза, делать акцент на конкретном опыте.
 - Позволяет написать письмо вручную: пользователь отправляет текст вакансии или ссылку, бот возвращает готовое письмо.
+- Логирует LLM-шаги пайплайна в локальную trace-базу для отладки качества, latency и ошибок.
+- Поддерживает eval-набор для регрессионной проверки prompt/scoring изменений.
 - Работает через Telegram-меню без отдельного интерфейса.
 
 ## Что реализовано под капотом
@@ -30,6 +32,8 @@ Telegram-бот, который помогает искать вакансии �
 - сохранение предпочтений к письмам;
 - ручная генерация письма;
 - запуск поиска по кнопке;
+- ручной scan Telegram job channels;
+- просмотр последних сохранённых TG-постов;
 - включение и выключение автопоиска;
 - просмотр текущих настроек;
 - очистка истории просмотренных вакансий.
@@ -49,6 +53,59 @@ Telegram-бот, который помогает искать вакансии �
 - умеет листать выдачу, пока не наберет заданное количество новых вакансий;
 - возвращает нормализованные `Vacancy`-модели через `pydantic`;
 - выводит диагностичную ошибку с `status`, `request_id` и `errors`, если HH API вернул неуспешный ответ.
+
+## Источники вакансий
+
+Бот поддерживает несколько источников. Каждый включается/выключается через `.env`:
+
+| Источник | Требуется | Переменная |
+|----------|-----------|------------|
+| SuperJob | API ключ ([регистрация](https://api.superjob.ru/register)) | `SUPERJOB_API_KEY` |
+| Trudvsem (Работа России) | Ничего | `TRUDVSEM_ENABLED=1` (по умолчанию вкл) |
+
+Если все источники отключены, бот сообщит об этом при попытке поиска.
+
+### Telegram job sources
+
+Отдельный CLI-reader умеет читать публичные Telegram-каналы через Telethon и сохранять подходящие посты в локальную SQLite-базу `data/source_posts.sqlite`.
+
+Это пока не подключено к основному LLM-пайплайну и Telegram-боту: первый шаг только собирает и фильтрует сырой feed.
+
+Настройки в `.env`:
+
+```env
+TG_API_ID=your_telegram_api_id_here
+TG_API_HASH=your_telegram_api_hash_here
+TG_SESSION_NAME=job_bot_tg_source
+TG_JOB_CHANNELS=ods_jobs,some_ai_jobs_channel
+TG_SOURCE_KEYWORDS=python,ai,llm,qa automation
+TG_SOURCE_NEGATIVE_KEYWORDS=senior,lead,relocation only
+```
+
+Первый запуск может попросить телефон и код авторизации Telegram:
+
+```powershell
+python -m app.sources.telegram_feed --limit 20
+```
+
+Запуск с параметрами без изменения `.env`:
+
+```powershell
+python -m app.sources.telegram_feed --channels ods_jobs --keywords "python,llm" --negative-keywords "senior,lead" --limit 20
+```
+
+Посмотреть последние сохранённые посты:
+
+```powershell
+python -m app.sources.telegram_feed --list-saved --limit 10
+```
+
+В Telegram-меню есть две кнопки:
+
+- `📡 Скан TG` — читает каналы из `TG_JOB_CHANNELS`, фильтрует по текущим ключам и исключениям пользователя, сохраняет новые посты.
+- `🗂 TG посты` — показывает последние сохранённые TG-посты.
+
+Первую авторизацию Telethon лучше сделать через CLI, потому что Telegram может запросить телефон и код.
 
 ### Память и настройки
 
@@ -78,6 +135,79 @@ Telegram-бот, который помогает искать вакансии �
 4. `Critic` оценивает письмо, ищет проблемы и при необходимости возвращает улучшенную версию.
 
 Если качество ниже порога, пайплайн делает повторную попытку с обратной связью от критика.
+
+Пайплайн возвращает структурированный результат для evals и diagnostics, а основной Telegram-flow по-прежнему получает только готовый текст письма.
+
+### LLM observability
+
+LLM-вызовы пишутся в отдельную SQLite-базу `data/traces.sqlite`.
+
+Логируются:
+
+- `run_id`;
+- шаг пайплайна: `parse_job`, `match_profile`, `write_letter`, `critique_letter`;
+- модель;
+- latency;
+- token usage, если провайдер вернул `usage`;
+- статус и ошибка;
+- hash и короткий preview входа/выхода.
+
+Полные prompts и резюме по умолчанию не сохраняются.
+
+Посмотреть последние trace runs:
+
+```powershell
+python -m app.observability_report --last 5
+```
+
+### Evals
+
+В проекте есть лёгкий eval harness для проверки LLM-пайплайна на фиксированных CV/JD кейсах.
+
+Датасет лежит в `evals/dataset.jsonl`. Каждый кейс задаёт:
+
+- резюме;
+- вакансию;
+- ожидаемый `decision`: `good`, `maybe`, `bad`;
+- ожидаемый диапазон score;
+- запрещённые фразы для письма;
+- утверждения, которые письмо не должно выдумывать.
+- запрещённые synthetic gaps, которые matcher не должен выводить без явного требования вакансии.
+- запрещённые unsupported phrases в matcher output: например `вероятно`, `быстро освоит`, `легко адаптируется`.
+
+Проверить датасет без LLM-запросов:
+
+```powershell
+python -m app.evals.run --dry-run
+```
+
+Запустить evals:
+
+```powershell
+python -m app.evals.run
+```
+
+Сохранить JSON-отчёт:
+
+```powershell
+python -m app.evals.run --output evals/results/latest.json
+```
+
+Запустить один кейс для отладки prompt/scoring изменений:
+
+```powershell
+python -m app.evals.run --case-id prompt_engineer_good_001
+```
+
+Команда возвращает non-zero exit code, если хотя бы один кейс провален.
+
+Текущий baseline:
+
+```text
+Cases: 11
+Passed: 11
+Failed: 0
+```
 
 ### Ручная генерация письма
 
@@ -120,9 +250,13 @@ Telegram-бот, который помогает искать вакансии �
 app/
   agents/        LLM-агенты и пайплайн генерации писем
   database/      SQLite-модели и настройки пользователей
+  evals/         CLI runner и deterministic checks для eval-набора
   handlers/      Telegram-команды и меню
   services/      HH API и Telegram-уведомления
+  sources/       Источники вакансий вне HH, включая Telegram feed reader
   utils/         Загрузка текста вакансии по URL и вспомогательные функции
+  observability.py  Локальное логирование LLM trace steps
+evals/           JSONL-датасет для regression checks
 config.py        Конфигурация окружения
 main_bot.py      Точка входа
 ```
@@ -130,13 +264,17 @@ main_bot.py      Точка входа
 ## Локальные данные и безопасность
 
 Бот хранит пользовательские данные в `bot_data.sqlite`.
+Trace-логи LLM-пайплайна хранятся в `data/traces.sqlite`.
+Посты из Telegram source reader хранятся в `data/source_posts.sqlite`.
 
-Этот файл не должен попадать в git, потому что там могут быть:
+Эти SQLite-файлы не должны попадать в git, потому что там могут быть:
 
 - резюме;
 - настройки пользователей;
 - история вакансий;
 - персональные предпочтения.
+- фрагменты входов/выходов LLM-пайплайна.
+- тексты вакансий и контакты из Telegram-постов.
 
 Также не коммитьте `.env`, Telegram-токены и ключи LLM API.
 
@@ -186,3 +324,56 @@ python .\main_bot.py
 ```
 
 После запуска откройте Telegram, отправьте боту `/start`, загрузите резюме и настройте ключевые слова.
+
+## Запуск на VPS 24/7
+
+Самый простой рабочий вариант для Linux-сервера - держать бота как `systemd` service.
+
+1. Подготовьте сервер:
+
+```bash
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip
+```
+
+2. Скопируйте проект на сервер, например в `/opt/hh_agent`, и создайте окружение:
+
+```bash
+cd /opt/hh_agent
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+```
+
+3. Заполните `.env`.
+
+Для обычной работы достаточно `TG_BOT_TOKEN`, `LLM_API_KEY`, `LLM_BASE_URL`, `MODEL_NAME`.
+
+Если используете Telegram channel scan через Telethon, один раз выполните ручную авторизацию:
+
+```bash
+source .venv/bin/activate
+python -m app.sources.telegram_feed --limit 1
+```
+
+4. Установите systemd unit:
+
+```bash
+sudo cp deploy/systemd/hh-agent.service /etc/systemd/system/hh-agent.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now hh-agent
+```
+
+5. Проверьте статус и логи:
+
+```bash
+sudo systemctl status hh-agent
+sudo journalctl -u hh-agent -f
+```
+
+Замечания:
+
+- Бот использует polling, поэтому webhook отдельно не нужен.
+- SQLite-файлы и Telethon session по умолчанию лежат внутри директории проекта.
+- Пути можно переопределить через `.env`: `BOT_DB_PATH`, `TRACE_DB_PATH`, `TG_SOURCE_DB_PATH`, `TG_SESSION_NAME`.
