@@ -3,6 +3,7 @@ import logging
 import traceback
 import aiosqlite  # Добавили для работы с памятью вакансий
 from aiogram import Bot, Dispatcher, F
+from aiogram.exceptions import TelegramNetworkError
 from aiogram.types import Message
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -11,7 +12,6 @@ from app.handlers.commands import router
 from app.database.models import init_db, get_user_settings, DB_NAME
 
 # Импортируем наши боевые сервисы и агентов
-from app.services.hh_client import HHClient
 from app.agents.analyzer import AnalyzerAgent
 from app.agents.writer import WriterAgent
 from app.services.telegram import TelegramNotifier
@@ -68,134 +68,129 @@ async def count_seen_vacancies(user_id: int) -> int:
         ) as cursor:
             row = await cursor.fetchone()
             return int(row[0]) if row else 0
+
+async def get_seen_ids(user_id: int) -> set[str]:
+    """Load all seen vacancy IDs for a user as a set (for fast lookup)."""
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute(
+            "SELECT vacancy_id FROM seen_vacancies WHERE user_id = ?",
+            (user_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return {row[0] for row in rows}
 # ------------------------------------
 
 async def run_search_job(user_id: int):
-    """Главная функция: берет данные из БД и запускает агентов для одного пользователя."""
+    """Main search function: fetches from all active sources, analyzes, writes letters."""
+    from app.sources.registry import get_active_sources
+
     settings = await get_user_settings(user_id)
-    
+
     if not settings:
-        logging.info(f"Настройки для пользователя {user_id} не найдены.")
+        logging.info(f"Settings not found for user {user_id}.")
         return
 
-    resume_text = settings.get('resume_text')
-    keywords = settings.get('keywords')
-    negative_keywords = settings.get('negative_keywords', [])
+    resume_text = settings.get("resume_text")
+    keywords = settings.get("keywords")
+    negative_keywords = settings.get("negative_keywords", [])
 
     if not resume_text or not keywords:
-        await bot.send_message(user_id, "⚠️ Не могу начать поиск: не задано резюме или ключевые слова. Настрой их в меню!")
+        await bot.send_message(
+            user_id,
+            "⚠️ Не могу начать поиск: не задано резюме или ключевые слова. Настрой их в меню!",
+        )
         return
 
-    await bot.send_message(user_id, "🔍 Начинаю поиск вакансий по твоим ключам. Это может занять пару минут...")
-    
-    hh_client = HHClient()
+    sources = get_active_sources()
+    if not sources:
+        await bot.send_message(
+            user_id,
+            "⚠️ Нет активных источников вакансий. Проверь настройки SUPERJOB_API_KEY и TRUDVSEM_ENABLED в .env.",
+        )
+        return
+
+    source_names = ", ".join(s.source_name for s in sources)
+    await bot.send_message(
+        user_id,
+        f"🔍 Начинаю поиск вакансий ({source_names}). Это может занять пару минут...",
+    )
+
     analyzer = AnalyzerAgent()
     writer = WriterAgent()
-    
-    # ВАЖНО: Передаем конкретный user_id, чтобы бот писал нужному другу, а не только вам
-    tg_notifier = TelegramNotifier(chat_id=str(user_id)) 
-    
-    try:
-        # 1. Получаем вакансии: листаем страницы HH, пока не наберём «новых» (ещё не в seen_vacancies)
-        async def vacancy_already_seen(vacancy_id: str) -> bool:
-            return await is_vacancy_seen(user_id, vacancy_id)
+    tg_notifier = TelegramNotifier(chat_id=str(user_id))
 
-        vacancies = await hh_client.fetch_vacancies(
-            keywords=keywords,
-            negative_keywords=negative_keywords,
-            target_new_count=100,
-            is_already_seen=vacancy_already_seen,
-        )
-        if not vacancies:
-            await bot.send_message(user_id, "🤷‍♂️ По твоим ключам пока нет новых вакансий на HH.")
+    try:
+        seen_ids = await get_seen_ids(user_id)
+
+        all_vacancies = []
+        for source in sources:
+            try:
+                vacancies = await source.fetch_vacancies(
+                    keywords=keywords,
+                    negative_keywords=negative_keywords,
+                    seen_ids=seen_ids,
+                    target_count=50,
+                )
+                all_vacancies.extend(vacancies)
+                logging.info(
+                    f"[{user_id}] {source.source_name}: fetched {len(vacancies)} new vacancies"
+                )
+            except Exception as exc:
+                logging.error(
+                    f"[{user_id}] {source.source_name} failed: {exc}"
+                )
+
+        if not all_vacancies:
+            await bot.send_message(
+                user_id,
+                "🤷‍♂️ По твоим ключам пока нет новых вакансий.",
+            )
             return
 
         found_good = 0
-        skipped = 0
-        unique_viewed_this_run: set[str] = set()
-        
-        # 2. Анализируем каждую
-        for vac in vacancies:
-            # Получаем уникальный ID вакансии (или ссылку, если ID вдруг нет)
-            vac_id = str(getattr(vac, 'id', getattr(vac, 'alternate_url', vac.name)))
-            
-            # ПРОВЕРКА ПАМЯТИ: Если уже видели — пропускаем!
-            if await is_vacancy_seen(user_id, vac_id):
-                skipped += 1
-                continue
 
-            logging.info(f"[{user_id}] Анализируем: {getattr(vac, 'name', 'Неизвестная вакансия')}")
-            
-            # Безопасно собираем текст вакансии
-            vac_text = ""
-            if hasattr(vac, 'description') and vac.description:
-                vac_text = vac.description
-            elif hasattr(vac, 'snippet') and vac.snippet:
-                req = vac.snippet.get('requirement', '') if isinstance(vac.snippet, dict) else getattr(vac.snippet, 'requirement', '')
-                res = vac.snippet.get('responsibility', '') if isinstance(vac.snippet, dict) else getattr(vac.snippet, 'responsibility', '')
-                req = req if req else ""
-                res = res if res else ""
-                vac_text = f"Требования: {req}\nОбязанности: {res}"
-            else:
-                vac_text = str(getattr(vac, '__dict__', vac))
+        for vac in all_vacancies:
+            logging.info(f"[{user_id}] Analyzing: {vac.title} ({vac.source})")
 
-            # Безопасное получение компании и ссылки
-            company_name = "Неизвестная компания"
-            if hasattr(vac, 'company_name'):
-                company_name = vac.company_name
-            elif hasattr(vac, 'employer') and vac.employer:
-                if isinstance(vac.employer, dict):
-                    company_name = vac.employer.get('name', 'Неизвестная компания')
-                else:
-                    company_name = getattr(vac.employer, 'name', 'Неизвестная компания')
-            vac_url = getattr(vac, 'alternate_url', getattr(vac, 'url', 'Нет ссылки'))
+            analysis = await analyzer.analyze_vacancy(vac.description, resume_text)
+            await mark_vacancy_seen(user_id, vac.external_id)
 
-            # Прогоняем через аналитика
-            analysis = await analyzer.analyze_vacancy(vac_text, resume_text)
-            
-            # Отмечаем как просмотренную, чтобы больше не анализировать её в будущем
-            await mark_vacancy_seen(user_id, vac_id)
-            unique_viewed_this_run.add(vac_id)
-            
-            # 3. Фильтруем и пишем письмо
             if analysis.match_score >= 60:
                 letter = await writer.generate_letter(
-                    vac_text,
+                    vac.description,
                     resume_text,
                     tone_samples=settings.get("tone_samples", ""),
                     preferences=settings.get("preferences", ""),
                 )
-                
-                # 4. Отправляем в Telegram
+
                 await tg_notifier.send_vacancy_alert(
-                    title=getattr(vac, 'name', 'Неизвестная вакансия'),
-                    company=company_name,
-                    url=vac_url,
+                    title=vac.title,
+                    company=vac.company,
+                    url=vac.url,
                     score=analysis.match_score,
                     reason=analysis.brief_reason,
-                    cover_letter=letter.text
+                    cover_letter=letter.text,
                 )
                 found_good += 1
-        
-        total_unique_seen = await count_seen_vacancies(user_id)
+
+        total_seen = await count_seen_vacancies(user_id)
         await bot.send_message(
             user_id,
-            "✅ Поиск завершен!\n"
-            f"Новых крутых вакансий найдено: {found_good}\n"
-            f"Уникальных вакансий просмотрено в этом поиске: {len(unique_viewed_this_run)}\n"
-            f"Всего уникальных в истории просмотров: {total_unique_seen}\n"
-            f"Пропущено старых: {skipped}",
+            f"✅ Поиск завершен!\n"
+            f"Проверено новых вакансий: {len(all_vacancies)}\n"
+            f"Подходящих: {found_good}\n"
+            f"Всего в истории: {total_seen}",
         )
-        
+
     except Exception as e:
         err_trace = traceback.format_exc()
-        logging.error(f"Ошибка во время поиска для {user_id}:\n{err_trace}")
-        safe_error = str(e).replace('<', '&lt;').replace('>', '&gt;')
+        logging.error(f"Search error for {user_id}:\n{err_trace}")
+        safe_error = str(e).replace("<", "&lt;").replace(">", "&gt;")
         await bot.send_message(
-            user_id, 
+            user_id,
             f"❌ <b>Произошла ошибка во время поиска.</b>\n\n"
             f"<b>Техническая деталь:</b>\n<code>{safe_error}</code>",
-            parse_mode="HTML"
+            parse_mode="HTML",
         )
 
 async def scheduled_search_for_all():
@@ -221,18 +216,30 @@ async def clear_history_handler(message: Message):
     await message.answer("🧹 История просмотренных вакансий успешно очищена!\nТеперь при следующем поиске бот заново проверит все актуальные вакансии на HH.")
 
 async def main():
-    await init_db()
-    await init_seen_db() # Инициализируем таблицу с памятью вакансий
-    dp.include_router(router)
-    
     scheduler = AsyncIOScheduler()
-    # Теперь планировщик вызывает функцию, которая обрабатывает ВСЕХ друзей
-    scheduler.add_job(scheduled_search_for_all, "interval", hours=4)
-    scheduler.start()
-    
-    logging.info("Бот успешно запущен и ждет команд!")
-    await bot.delete_webhook(drop_pending_updates=True) 
-    await dp.start_polling(bot)
+    try:
+        await init_db()
+        await init_seen_db() # Инициализируем таблицу с памятью вакансий
+        dp.include_router(router)
+
+        # Теперь планировщик вызывает функцию, которая обрабатывает ВСЕХ друзей
+        scheduler.add_job(scheduled_search_for_all, "interval", hours=4)
+        scheduler.start()
+
+        logging.info("Бот успешно запущен и ждет команд!")
+        await bot.delete_webhook(drop_pending_updates=True)
+        await dp.start_polling(bot)
+    except TelegramNetworkError as exc:
+        logging.error(
+            "Не удалось подключиться к Telegram API. "
+            "Проверь интернет/DNS/VPN/proxy и доступность api.telegram.org: %s",
+            exc,
+        )
+        raise
+    finally:
+        if scheduler.running:
+            scheduler.shutdown(wait=False)
+        await bot.session.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
