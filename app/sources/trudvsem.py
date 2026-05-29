@@ -94,7 +94,7 @@ class TrudvsemClient(JobSource):
                     return collected
 
                 vacancies_raw = (
-                    data.get("results", {}).get("vacancies") or []
+                    (data.get("results") or {}).get("vacancies") or []
                 )
                 if not vacancies_raw:
                     break
