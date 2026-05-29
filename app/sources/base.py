@@ -27,3 +27,10 @@ class JobSource(ABC):
         seen_ids: set[str],
         target_count: int = 50,
     ) -> list[UnifiedVacancy]: ...
+
+
+def contains_excluded_keyword(vacancy: UnifiedVacancy, excluded_keywords: list[str]) -> bool:
+    if not excluded_keywords:
+        return False
+    text = f"{vacancy.title} {vacancy.description}".lower()
+    return any(kw in text for kw in excluded_keywords)
