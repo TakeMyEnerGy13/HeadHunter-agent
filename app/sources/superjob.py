@@ -72,7 +72,9 @@ class SuperJobClient(JobSource):
         seen_ids: set[str],
         target_count: int = 50,
     ) -> list[UnifiedVacancy]:
-        keyword = " ".join(keywords)
+        # SuperJob treats "|" as OR and a bare space as AND, so join with "|"
+        # to match vacancies relevant to ANY keyword instead of all at once.
+        keyword = " | ".join(kw.strip() for kw in keywords if kw.strip())
         normalized_negative = [kw.lower() for kw in negative_keywords if kw.strip()]
         collected: list[UnifiedVacancy] = []
 

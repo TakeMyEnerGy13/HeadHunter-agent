@@ -29,7 +29,6 @@ class AnalyzerAgent:
             api_key=api_key,
             base_url=base_url
         )
-        print(f"\n[DEBUG] Агент стучится сюда: {self.client.base_url}")
 
     async def analyze_vacancy(
         self,
@@ -59,9 +58,6 @@ class AnalyzerAgent:
         content = response.choices[0].message.content if response.choices else None
         if not content:
             raise AnalyzerAgentError("LLM не вернул содержимое ответа")
-
-        # --- ДЕБАГ: Смотрим, что реально ответила нейросеть ---
-        print(f"\n[DEBUG] Сырой ответ ИИ:\n{content}\n")
 
         # --- ОЧИСТКА: Убираем маркдаун-кавычки, если ИИ их добавил ---
         clean_content = content.replace("```json", "").replace("```", "").strip()

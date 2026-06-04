@@ -80,6 +80,10 @@ async def get_seen_ids(user_id: int) -> set[str]:
             return {row[0] for row in rows}
 # ------------------------------------
 
+# Minimum LLM match score for a vacancy to be worth a cover letter.
+MATCH_SCORE_THRESHOLD = 45
+
+
 async def run_search_job(user_id: int):
     """Main search function: fetches from all active sources, analyzes, writes letters."""
     from app.sources.registry import get_active_sources
@@ -140,6 +144,21 @@ async def run_search_job(user_id: int):
                     f"[{user_id}] {source.source_name} failed: {exc}"
                 )
 
+        # Dedupe: sources (esp. SuperJob OR-search) return the same posting
+        # repeatedly, and the same role gets re-listed per region. Collapse by
+        # external_id and by (title, company) so we don't waste LLM calls.
+        seen_ext: set[str] = set()
+        seen_title: set[tuple[str, str]] = set()
+        deduped = []
+        for vac in all_vacancies:
+            title_key = (vac.title.strip().lower(), vac.company.strip().lower())
+            if vac.external_id in seen_ext or title_key in seen_title:
+                continue
+            seen_ext.add(vac.external_id)
+            seen_title.add(title_key)
+            deduped.append(vac)
+        all_vacancies = deduped
+
         if not all_vacancies:
             await bot.send_message(
                 user_id,
@@ -153,9 +172,12 @@ async def run_search_job(user_id: int):
             logging.info(f"[{user_id}] Analyzing: {vac.title} ({vac.source})")
 
             analysis = await analyzer.analyze_vacancy(vac.description, resume_text)
+            logging.info(
+                f"[{user_id}] {vac.title} ({vac.source}): score={analysis.match_score}"
+            )
             await mark_vacancy_seen(user_id, vac.external_id)
 
-            if analysis.match_score >= 60:
+            if analysis.match_score >= MATCH_SCORE_THRESHOLD:
                 letter = await writer.generate_letter(
                     vac.description,
                     resume_text,

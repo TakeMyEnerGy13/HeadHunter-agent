@@ -1,7 +1,7 @@
 import pytest
 import httpx
 
-from app.sources.trudvsem import TrudvsemClient
+from app.sources.trudvsem import TrudvsemClient, BASE_URL
 
 
 SAMPLE_RESPONSE = {
@@ -137,10 +137,77 @@ async def test_salary_zero_means_none(client, httpx_mock):
     httpx_mock.add_response(json=SAMPLE_RESPONSE)
 
     results = await client.fetch_vacancies(
-        keywords=[],
+        keywords=["python"],
         negative_keywords=[],
         seen_ids=set(),
         target_count=50,
     )
     vac_cpp = [v for v in results if "C++" in v.title][0]
     assert vac_cpp.salary is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_merges_and_dedupes_across_keywords(client, httpx_mock):
+    resp_python = {
+        "status": "200",
+        "meta": {"total": 1, "limit": 100},
+        "results": {
+            "vacancies": [
+                {
+                    "vacancy": {
+                        "id": "p1",
+                        "job-name": "Python Dev",
+                        "company": {"name": "A"},
+                        "vac_url": "u1",
+                        "salary_min": 0,
+                        "salary_max": 0,
+                    }
+                }
+            ]
+        },
+    }
+    resp_ai = {
+        "status": "200",
+        "meta": {"total": 2, "limit": 100},
+        "results": {
+            "vacancies": [
+                {
+                    "vacancy": {
+                        "id": "p1",
+                        "job-name": "Python Dev",
+                        "company": {"name": "A"},
+                        "vac_url": "u1",
+                        "salary_min": 0,
+                        "salary_max": 0,
+                    }
+                },
+                {
+                    "vacancy": {
+                        "id": "x2",
+                        "job-name": "AI Engineer",
+                        "company": {"name": "B"},
+                        "vac_url": "u2",
+                        "salary_min": 0,
+                        "salary_max": 0,
+                    }
+                },
+            ]
+        },
+    }
+    httpx_mock.add_response(
+        url=httpx.URL(BASE_URL, params={"text": "python", "offset": 0, "limit": 100}),
+        json=resp_python,
+    )
+    httpx_mock.add_response(
+        url=httpx.URL(BASE_URL, params={"text": "ai", "offset": 0, "limit": 100}),
+        json=resp_ai,
+    )
+
+    results = await client.fetch_vacancies(
+        keywords=["python", "ai"],
+        negative_keywords=[],
+        seen_ids=set(),
+        target_count=50,
+    )
+
+    assert [v.external_id for v in results] == ["trudvsem:p1", "trudvsem:x2"]

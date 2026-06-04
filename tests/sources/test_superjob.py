@@ -138,6 +138,20 @@ async def test_salary_zero_means_none(client, httpx_mock):
 
 
 @pytest.mark.asyncio
+async def test_keywords_joined_with_or(client, httpx_mock):
+    httpx_mock.add_response(json=EMPTY_RESPONSE)
+
+    await client.fetch_vacancies(
+        keywords=["Python", "AI Engineer", "ИИ"],
+        negative_keywords=[],
+        seen_ids=set(),
+        target_count=50,
+    )
+    request = httpx_mock.get_request()
+    assert request.url.params["keyword"] == "Python | AI Engineer | ИИ"
+
+
+@pytest.mark.asyncio
 async def test_auth_header_sent(client, httpx_mock):
     httpx_mock.add_response(json=EMPTY_RESPONSE)
 

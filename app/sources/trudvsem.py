@@ -74,47 +74,56 @@ class TrudvsemClient(JobSource):
         seen_ids: set[str],
         target_count: int = 50,
     ) -> list[UnifiedVacancy]:
-        query = " ".join(keywords)
+        # Trudvsem has no OR operator (space, "|" and "," all narrow the search),
+        # so query each keyword separately and merge the results. seen_local also
+        # dedupes vacancies that match more than one keyword.
         normalized_negative = [kw.lower() for kw in negative_keywords if kw.strip()]
+        search_terms = [kw.strip() for kw in keywords if kw.strip()]
         collected: list[UnifiedVacancy] = []
-        offset = 0
+        seen_local = set(seen_ids)
 
         async with httpx.AsyncClient(timeout=15.0) as client:
-            for _ in range(MAX_PAGES):
+            for term in search_terms:
                 if len(collected) >= target_count:
                     break
 
-                params = {"text": query, "offset": offset, "limit": PAGE_LIMIT}
-                try:
-                    resp = await client.get(BASE_URL, params=params)
-                    resp.raise_for_status()
-                    data = resp.json()
-                except (httpx.HTTPError, ValueError) as exc:
-                    logger.warning("Trudvsem API error: %s", exc)
-                    return collected
-
-                vacancies_raw = (
-                    (data.get("results") or {}).get("vacancies") or []
-                )
-                if not vacancies_raw:
-                    break
-
-                for item in vacancies_raw:
+                offset = 0
+                for _ in range(MAX_PAGES):
                     if len(collected) >= target_count:
                         break
-                    vac = _parse_vacancy(item)
-                    if vac is None:
-                        continue
-                    if vac.external_id in seen_ids:
-                        continue
-                    if contains_excluded_keyword(vac, normalized_negative):
-                        continue
-                    collected.append(vac)
 
-                if len(vacancies_raw) < PAGE_LIMIT:
-                    break
+                    params = {"text": term, "offset": offset, "limit": PAGE_LIMIT}
+                    try:
+                        resp = await client.get(BASE_URL, params=params)
+                        resp.raise_for_status()
+                        data = resp.json()
+                    except (httpx.HTTPError, ValueError) as exc:
+                        logger.warning("Trudvsem API error for '%s': %s", term, exc)
+                        break
 
-                offset += PAGE_LIMIT
-                await asyncio.sleep(THROTTLE_SECONDS)
+                    vacancies_raw = (
+                        (data.get("results") or {}).get("vacancies") or []
+                    )
+                    if not vacancies_raw:
+                        break
+
+                    for item in vacancies_raw:
+                        if len(collected) >= target_count:
+                            break
+                        vac = _parse_vacancy(item)
+                        if vac is None:
+                            continue
+                        if vac.external_id in seen_local:
+                            continue
+                        if contains_excluded_keyword(vac, normalized_negative):
+                            continue
+                        collected.append(vac)
+                        seen_local.add(vac.external_id)
+
+                    if len(vacancies_raw) < PAGE_LIMIT:
+                        break
+
+                    offset += PAGE_LIMIT
+                    await asyncio.sleep(THROTTLE_SECONDS)
 
         return collected
