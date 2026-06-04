@@ -1,7 +1,8 @@
 import aiosqlite
 import json
+from config import BOT_DB_PATH
 
-DB_NAME = "bot_data.sqlite"
+DB_NAME = BOT_DB_PATH
 
 
 async def init_db():
@@ -130,4 +131,3 @@ async def get_active_settings():
                     }
                 )
     return users
-

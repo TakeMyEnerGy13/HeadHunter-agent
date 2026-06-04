@@ -1,0 +1,17 @@
+[Unit]
+Description=HH Agent Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hhagent
+Group=hhagent
+WorkingDirectory=/opt/hh_agent
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/hh_agent/.venv/bin/python /opt/hh_agent/main_bot.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
