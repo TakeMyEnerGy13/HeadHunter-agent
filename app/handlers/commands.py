@@ -364,6 +364,16 @@ async def generate_letter_handler(message: Message, state: FSMContext):
         await message.answer(f"❌ Не удалось загрузить вакансию: {e}")
         return
 
+    # A page behind a login/captcha or an SPA shell returns almost no text —
+    # don't feed that to the LLM, it will confidently invent a letter about nothing.
+    if len(job_text.strip()) < 200:
+        await status_msg.delete()
+        await message.answer(
+            "❌ Не похоже на вакансию — получил слишком мало текста "
+            "(возможно, ссылка требует входа или капчу). Пришли описание вакансии текстом."
+        )
+        return
+
     writer = WriterAgent()
     try:
         letter = await writer.generate_letter(

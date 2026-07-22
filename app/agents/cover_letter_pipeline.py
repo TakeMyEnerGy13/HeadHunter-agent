@@ -38,6 +38,8 @@ _FORBIDDEN_LETTER_PHRASES = (
     "прошу рассмотреть",
     "с уважением",
 )
+# Single source of truth for the phrase list injected into Writer/Critic prompts.
+_FORBIDDEN_LETTER_PHRASES_STR = ", ".join(f"'{p}'" for p in _FORBIDDEN_LETTER_PHRASES)
 
 
 @dataclass
@@ -133,10 +135,8 @@ _WRITER_SYSTEM = (
     "СТРОГИЕ ПРАВИЛА: "
     "1. Пиши ТОЛЬКО в стиле tone_samples — длина предложений, лексика, структура абзацев. "
     "2. Используй ТОЛЬКО факты из relevance_map — не выдумывай опыт. "
-    "3. Не пиши generic AI-slop. Запрещены вступления вроде: 'Привет!', 'Здравствуйте!', "
-    "'Видел вакансию', 'увидел вашу вакансию', 'хочу попробовать себя', 'мне интересна вакансия', "
-    "'заинтересовала ваша компания', 'командный игрок', 'стрессоустойчив', 'Прошу рассмотреть', "
-    "'С уважением'. "
+    "3. Не пиши generic AI-slop. Запрещены шаблонные фразы и приветствия вроде: "
+    f"{_FORBIDDEN_LETTER_PHRASES_STR}. "
     "4. Первое предложение должно сразу давать конкретный матч: что из опыта кандидата закрывает "
     "главное требование вакансии. "
     "5. Пиши как живой человек: коротко, спокойно, без канцелярита, самопрезентации и восторга. "
@@ -166,7 +166,11 @@ _WRITER_USER = """\
 Мои предпочтения к письму:
 {preferences}
 
-Детали вакансии:
+Полный текст вакансии (первоисточник — сверяйся с точными формулировками, ключевыми словами
+и отдельными просьбами рекрутера, например «укажите в отклике слово X»):
+{job_text}
+
+Детали вакансии (структурированная выжимка):
 {job_json}
 
 Релевантный опыт (используй ТОЛЬКО это, не выдумывай):
@@ -191,7 +195,10 @@ _CRITIC_USER = """\
 Пожелания кандидата к письму:
 {preferences}
 
-Вакансия:
+Полный текст вакансии (первоисточник):
+{job_text}
+
+Вакансия (структурированная выжимка):
 {job_json}
 
 Релевантный опыт, на который разрешено опираться:
@@ -222,10 +229,7 @@ _CRITIC_USER = """\
 9. Соответствует пожеланиям кандидата к письму (длина, акценты, тон). Если пожелание нарушено — это issue.
 
 Ставь score <= 4, если письмо содержит фразы вроде:
-'Привет', 'Здравствуйте', 'видел вакансию', 'увидел вакансию', 'хочу попробовать себя',
-'мне интересна вакансия', 'заинтересовала ваша компания', 'готов развиваться',
-'готов быстро освоить', 'вопрос пары дней', 'пару дней практики', 'прямо в вашем стеке',
-'командный игрок', 'стрессоустойчив', 'прошу рассмотреть', 'с уважением'.
+{forbidden_list}.
 
 score < 7 = письмо нужно переписать."""
 
@@ -255,6 +259,7 @@ async def _call_json(
                 {"role": "user", "content": user},
             ],
             response_format={"type": "json_object"},
+            temperature=0.2,
         )
         content = response.choices[0].message.content or "{}"
         clean = content.replace("```json", "").replace("```", "").strip()
@@ -363,6 +368,7 @@ async def _match_profile(
 async def _write_letter(
     relevance_map: dict,
     job_data: dict,
+    job_text: str,
     tone_samples: str,
     preferences: str,
     client: AsyncOpenAI,
@@ -382,6 +388,7 @@ async def _write_letter(
             feedback_block=feedback_block,
             tone_samples=tone_samples or "Стиль не задан — пиши лаконично и по делу.",
             preferences=preferences or "Без особых предпочтений.",
+            job_text=job_text[:4000],
             job_json=json.dumps(job_data, ensure_ascii=False, indent=2),
             relevance_map=json.dumps(relevance_map, ensure_ascii=False, indent=2),
         ),
@@ -393,6 +400,7 @@ async def _write_letter(
 async def _critique_letter(
     letter: str,
     job_data: dict,
+    job_text: str,
     relevance_map: dict,
     tone_samples: str,
     preferences: str,
@@ -406,13 +414,23 @@ async def _critique_letter(
         _CRITIC_USER.format(
             tone_samples=tone_samples or "Стиль не задан.",
             preferences=preferences or "Без особых предпочтений.",
+            job_text=job_text[:4000],
             job_json=json.dumps(job_data, ensure_ascii=False, indent=2),
             relevance_map=json.dumps(relevance_map, ensure_ascii=False, indent=2),
             letter=letter,
+            forbidden_list=_FORBIDDEN_LETTER_PHRASES_STR,
         ),
         step_name="critique_letter",
         run_id=run_id,
     )
+
+
+def _coerce_score(raw) -> int:
+    """Tolerant score parsing: '8/10', '7.5', 8 → int; anything unparseable → 0 (rewrite)."""
+    try:
+        return int(float(str(raw).split("/")[0].strip()))
+    except (ValueError, TypeError):
+        return 0
 
 
 def _find_forbidden_phrases(letter: str) -> list[str]:
@@ -423,8 +441,9 @@ def _find_forbidden_phrases(letter: str) -> list[str]:
 def _has_forbidden_phrase(normalized_text: str, phrase: str) -> bool:
     normalized_phrase = phrase.lower().replace("ё", "е")
     if normalized_phrase == "с уважением":
+        # Catches a standalone sign-off AND "с уважением, Имя" (letters after comma).
         return any(
-            re.match(r"^\s*с уважением[\s,.!]*$", line)
+            re.match(r"^\s*с уважением\b", line)
             for line in normalized_text.splitlines()
         )
 
@@ -491,15 +510,15 @@ async def run_cover_letter_pipeline_result(
 
         for attempt in range(_MAX_RETRIES + 1):
             letter = await _write_letter(
-                relevance_map, job_data, tone_samples, preferences,
+                relevance_map, job_data, job_text, tone_samples, preferences,
                 client, model, run_id, feedback=feedback,
             )
             critique = await _critique_letter(
-                letter, job_data, relevance_map, tone_samples, preferences,
+                letter, job_data, job_text, relevance_map, tone_samples, preferences,
                 client, model, run_id,
             )
 
-            score = int(critique.get("score", 0))
+            score = _coerce_score(critique.get("score", 0))
             forbidden_phrases = _find_forbidden_phrases(letter)
             has_forbidden_phrases = bool(forbidden_phrases)
             if forbidden_phrases:
@@ -531,7 +550,12 @@ async def run_cover_letter_pipeline_result(
             if score >= _PASS_SCORE:
                 break
 
-            feedback = issues
+            # Critic can drop the score without naming issues — give the retry
+            # something to act on instead of re-running the identical prompt.
+            feedback = issues or [
+                "Критик снизил балл, но не назвал причину. Усиль конкретику первого "
+                "предложения и привяжи каждый инструмент к реальному кейсу из relevance_map.",
+            ]
 
         await finish_run(
             run_id=run_id,
