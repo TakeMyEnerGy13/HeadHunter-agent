@@ -43,7 +43,6 @@ _FORBIDDEN_LETTER_PHRASES = (
 @dataclass
 class CoverLetterAttempt:
     letter: str
-    revised_letter: str
     score: int
     issues: list[str] = field(default_factory=list)
     forbidden_phrases: list[str] = field(default_factory=list)
@@ -189,6 +188,9 @@ _CRITIC_USER = """\
 Примеры стиля (эталон):
 {tone_samples}
 
+Пожелания кандидата к письму:
+{preferences}
+
 Вакансия:
 {job_json}
 
@@ -201,8 +203,7 @@ _CRITIC_USER = """\
 Оцени по шкале 1-10 и верни JSON:
 {{
   "score": 8,
-  "issues": ["конкретная проблема если есть"],
-  "revised_letter": "улучшенная версия письма или оригинал если score >= 7"
+  "issues": ["конкретная проблема если есть"]
 }}
 
 Критерии оценки:
@@ -218,6 +219,7 @@ _CRITIC_USER = """\
    содержать минимум 2 конкретных кейса или end-to-end примера, а не только список инструментов
 8. Если вакансия про бизнес-процессы, письмо должно явно показать, что кандидат умеет разбирать процесс
    и собирать под него рабочую автоматизацию или прототип
+9. Соответствует пожеланиям кандидата к письму (длина, акценты, тон). Если пожелание нарушено — это issue.
 
 Ставь score <= 4, если письмо содержит фразы вроде:
 'Привет', 'Здравствуйте', 'видел вакансию', 'увидел вакансию', 'хочу попробовать себя',
@@ -393,6 +395,7 @@ async def _critique_letter(
     job_data: dict,
     relevance_map: dict,
     tone_samples: str,
+    preferences: str,
     client: AsyncOpenAI,
     model: str,
     run_id: str,
@@ -402,6 +405,7 @@ async def _critique_letter(
         client, model, _CRITIC_SYSTEM,
         _CRITIC_USER.format(
             tone_samples=tone_samples or "Стиль не задан.",
+            preferences=preferences or "Без особых предпочтений.",
             job_json=json.dumps(job_data, ensure_ascii=False, indent=2),
             relevance_map=json.dumps(relevance_map, ensure_ascii=False, indent=2),
             letter=letter,
@@ -491,12 +495,12 @@ async def run_cover_letter_pipeline_result(
                 client, model, run_id, feedback=feedback,
             )
             critique = await _critique_letter(
-                letter, job_data, relevance_map, tone_samples, client, model, run_id
+                letter, job_data, relevance_map, tone_samples, preferences,
+                client, model, run_id,
             )
 
             score = int(critique.get("score", 0))
-            revised = critique.get("revised_letter") or letter
-            forbidden_phrases = _find_forbidden_phrases(revised)
+            forbidden_phrases = _find_forbidden_phrases(letter)
             has_forbidden_phrases = bool(forbidden_phrases)
             if forbidden_phrases:
                 score = min(score, 4)
@@ -508,7 +512,6 @@ async def run_cover_letter_pipeline_result(
             attempts.append(
                 CoverLetterAttempt(
                     letter=letter,
-                    revised_letter=revised,
                     score=score,
                     issues=issues,
                     forbidden_phrases=forbidden_phrases,
@@ -520,7 +523,7 @@ async def run_cover_letter_pipeline_result(
                 or (has_forbidden_phrases == best_has_forbidden_phrases and score > best_score)
             ):
                 best_score = score
-                best_letter = revised
+                best_letter = letter
                 best_has_forbidden_phrases = has_forbidden_phrases
 
             logger.info("Critic score: %d/%d (attempt %d)", score, _PASS_SCORE, attempt + 1)
