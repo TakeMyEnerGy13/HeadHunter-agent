@@ -1,6 +1,6 @@
 from openai import AsyncOpenAI
 
-from app.agents.cover_letter_pipeline import run_cover_letter_pipeline
+from app.agents.cover_letter_pipeline import run_cover_letter_pipeline_result
 from app.schemas.llm_schemas import CoverLetter
 from config import LLM_API_KEY, LLM_BASE_URL, MODEL_NAME
 
@@ -30,7 +30,7 @@ class WriterAgent:
         preferences: str = "",
     ) -> CoverLetter:
         try:
-            text = await run_cover_letter_pipeline(
+            result = await run_cover_letter_pipeline_result(
                 job_text=vacancy_text,
                 resume_text=resume_text,
                 tone_samples=tone_samples,
@@ -42,8 +42,22 @@ class WriterAgent:
         except Exception as exc:
             raise WriterAgentError(f"Ошибка пайплайна генерации письма: {exc}") from exc
 
-        if not text:
+        if not result.best_letter:
             raise WriterAgentError("Пайплайн не вернул текст письма")
 
-        return CoverLetter(text=text)
+        # B2: carry the matcher verdict through, so the caller can show the user
+        # how well the vacancy actually fits instead of just the letter text.
+        relevance = result.relevance_map or {}
+        try:
+            match_score = int(relevance.get("score"))
+        except (TypeError, ValueError):
+            match_score = None
+
+        return CoverLetter(
+            text=result.best_letter,
+            match_score=match_score,
+            decision=relevance.get("decision"),
+            gaps=[str(gap) for gap in relevance.get("gaps", [])],
+            attempts=len(result.attempts),
+        )
 

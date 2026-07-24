@@ -395,3 +395,20 @@ async def generate_letter_handler(message: Message, state: FSMContext):
     if len(text) > 4096:
         text = text[:4090] + "…"
     await message.answer(text)
+
+    # B2: the pipeline already computed a match score and gaps — show them,
+    # otherwise the user can't tell a strong fit from a hopeless one.
+    summary_lines = []
+    if letter.decision == "bad":
+        summary_lines.append(
+            "❗ Вакансия слабо подходит под резюме — не отправляй письмо без правок."
+        )
+    if letter.match_score is not None:
+        summary_lines.append(f"📊 Соответствие: {letter.match_score}/100")
+    if letter.gaps:
+        gaps = "\n".join(f"• {gap}" for gap in letter.gaps[:5])
+        summary_lines.append(f"⚠️ Не хватает по требованиям:\n{gaps}")
+    if letter.attempts > 1:
+        summary_lines.append(f"🔁 Попыток генерации: {letter.attempts}")
+    if summary_lines:
+        await message.answer("\n\n".join(summary_lines))
