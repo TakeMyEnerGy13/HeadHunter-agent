@@ -1,5 +1,11 @@
 from typing import Any
 
+# A4: single source of truth for phrase matching. The pipeline uses word-boundary
+# matching (with a "с уважением" sign-off special case); evals must match the same
+# way so an eval phrase can't false-positive on a substring (e.g. "привет" in
+# "приветствовать").
+from app.agents.cover_letter_pipeline import _has_forbidden_phrase
+
 REQUIRED_FIELDS = (
     "schema_version",
     "id",
@@ -39,10 +45,26 @@ def validate_case_schema(case: dict[str, Any]) -> list[str]:
         "must_not_claim",
         "forbidden_gap_phrases",
         "forbidden_relevance_phrases",
+        "must_mention",
     ):
         value = case.get(list_field, [])
         if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
             errors.append(f"{list_field} must be a list of strings")
+
+    # B5: optional length guard. Present values must be non-negative ints with min <= max.
+    letter_min = case.get("letter_min_chars")
+    letter_max = case.get("letter_max_chars")
+    for field_name, value in (("letter_min_chars", letter_min), ("letter_max_chars", letter_max)):
+        if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
+            errors.append(f"{field_name} must be a non-negative integer")
+    if (
+        isinstance(letter_min, int)
+        and not isinstance(letter_min, bool)
+        and isinstance(letter_max, int)
+        and not isinstance(letter_max, bool)
+        and letter_min > letter_max
+    ):
+        errors.append("letter_min_chars must be <= letter_max_chars")
 
     return errors
 
@@ -72,23 +94,37 @@ def evaluate_pipeline_result(case: dict[str, Any], result: Any) -> list[str]:
     normalized_letter = _normalize(letter)
 
     for phrase in case.get("forbidden_letter_phrases", []):
-        if _normalize(phrase) in normalized_letter:
+        if _has_forbidden_phrase(normalized_letter, phrase):
             errors.append(f"letter contains forbidden phrase: {phrase}")
 
     for claim in case.get("must_not_claim", []):
-        if _normalize(claim) in normalized_letter:
+        if _has_forbidden_phrase(normalized_letter, claim):
             errors.append(f"letter contains forbidden claim: {claim}")
+
+    # B5: positive check — the letter must actually mention these facts (word-boundary).
+    for phrase in case.get("must_mention", []):
+        if not _has_forbidden_phrase(normalized_letter, phrase):
+            errors.append(f"letter missing required mention: {phrase}")
+
+    # B5: length guard against degenerate output (truncated stub or wall of text).
+    letter_length = len(letter.strip())
+    letter_min = case.get("letter_min_chars")
+    letter_max = case.get("letter_max_chars")
+    if isinstance(letter_min, int) and not isinstance(letter_min, bool) and letter_length < letter_min:
+        errors.append(f"letter too short: {letter_length} chars < {letter_min}")
+    if isinstance(letter_max, int) and not isinstance(letter_max, bool) and letter_length > letter_max:
+        errors.append(f"letter too long: {letter_length} chars > {letter_max}")
 
     gaps_text = " ".join(str(gap) for gap in relevance_map.get("gaps", []))
     normalized_gaps = _normalize(gaps_text)
     for phrase in case.get("forbidden_gap_phrases", []):
-        if _normalize(phrase) in normalized_gaps:
+        if _has_forbidden_phrase(normalized_gaps, phrase):
             errors.append(f"gaps contain forbidden phrase: {phrase}")
 
     relevance_text = str(relevance_map)
     normalized_relevance = _normalize(relevance_text)
     for phrase in case.get("forbidden_relevance_phrases", []):
-        if _normalize(phrase) in normalized_relevance:
+        if _has_forbidden_phrase(normalized_relevance, phrase):
             errors.append(f"relevance_map contains forbidden phrase: {phrase}")
 
     return errors
