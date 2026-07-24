@@ -1,5 +1,3 @@
-from openai import AsyncOpenAI
-
 from app.agents.cover_letter_pipeline import run_cover_letter_pipeline_result
 from app.schemas.llm_schemas import CoverLetter
 from config import LLM_API_KEY, LLM_BASE_URL, MODEL_NAME
@@ -17,10 +15,8 @@ class WriterAgent:
         model_name: str = MODEL_NAME,
     ) -> None:
         self.model_name = model_name
-        self.client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=base_url,
-        )
+        self.base_url = base_url
+        self.api_key = api_key
 
     async def generate_letter(
         self,
@@ -35,8 +31,8 @@ class WriterAgent:
                 resume_text=resume_text,
                 tone_samples=tone_samples,
                 preferences=preferences,
-                base_url=str(self.client.base_url),
-                api_key=self.client.api_key,
+                base_url=self.base_url,
+                api_key=self.api_key,
                 model=self.model_name,
             )
         except Exception as exc:

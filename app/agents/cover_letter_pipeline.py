@@ -483,14 +483,25 @@ async def run_cover_letter_pipeline_result(
         feedback: list[str] | None = None
 
         for attempt in range(_MAX_RETRIES + 1):
-            letter = await _write_letter(
-                relevance_map, job_data, job_text, tone_samples, preferences,
-                client, model, run_id, feedback=feedback,
-            )
-            critique = await _critique_letter(
-                letter, job_data, job_text, relevance_map, tone_samples, preferences,
-                client, model, run_id,
-            )
+            try:
+                letter = await _write_letter(
+                    relevance_map, job_data, job_text, tone_samples, preferences,
+                    client, model, run_id, feedback=feedback,
+                )
+                critique = await _critique_letter(
+                    letter, job_data, job_text, relevance_map, tone_samples, preferences,
+                    client, model, run_id,
+                )
+            except Exception:
+                # A writer/critic failure on a later attempt must not discard an
+                # already usable letter from an earlier one.
+                if best_letter:
+                    logger.warning(
+                        "Attempt %d failed, returning best letter so far", attempt + 1,
+                        exc_info=True,
+                    )
+                    break
+                raise
 
             score = _coerce_score(critique.get("score", 0))
             forbidden_phrases = _find_forbidden_phrases(letter)
@@ -552,3 +563,5 @@ async def run_cover_letter_pipeline_result(
             error=str(exc),
         )
         raise
+    finally:
+        await client.close()
