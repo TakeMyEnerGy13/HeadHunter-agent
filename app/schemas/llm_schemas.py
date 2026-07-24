@@ -8,4 +8,8 @@ class VacancyAnalysis(BaseModel):
 
 class CoverLetter(BaseModel):
     text: str
+    match_score: int | None = None
+    decision: str | None = None
+    gaps: list[str] = Field(default_factory=list)
+    attempts: int = 0
 

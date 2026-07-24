@@ -455,32 +455,6 @@ def _has_forbidden_phrase(normalized_text: str, phrase: str) -> bool:
 # Public entrypoint
 # ---------------------------------------------------------------------------
 
-async def run_cover_letter_pipeline(
-    job_text: str,
-    resume_text: str,
-    tone_samples: str = "",
-    preferences: str = "",
-    base_url: str = LLM_BASE_URL,
-    api_key: str = LLM_API_KEY,
-    model: str = MODEL_NAME,
-) -> str:
-    """
-    Run the full 4-step cover letter pipeline.
-
-    Returns the best generated cover letter text.
-    """
-    result = await run_cover_letter_pipeline_result(
-        job_text=job_text,
-        resume_text=resume_text,
-        tone_samples=tone_samples,
-        preferences=preferences,
-        base_url=base_url,
-        api_key=api_key,
-        model=model,
-    )
-    return result.best_letter
-
-
 async def run_cover_letter_pipeline_result(
     job_text: str,
     resume_text: str,
