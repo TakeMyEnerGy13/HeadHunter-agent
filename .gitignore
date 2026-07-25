@@ -9,6 +9,9 @@
 *.sqlite
 *.sqlite3
 
+# Личное резюме — персональные данные, репозиторий публичный
+docs/resume.md
+
 # Локальные отчёты eval runs
 evals/results/
 
