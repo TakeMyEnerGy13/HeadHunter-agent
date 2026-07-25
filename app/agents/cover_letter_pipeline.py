@@ -48,6 +48,7 @@ class CoverLetterAttempt:
     score: int
     issues: list[str] = field(default_factory=list)
     forbidden_phrases: list[str] = field(default_factory=list)
+    hedging_sentences: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -155,9 +156,19 @@ _WRITER_SYSTEM = (
     "12. Не расширяй факты: SQLite не превращай в SQL/NoSQL, базовый CI/CD не превращай в опыт "
     "с CI/CD пайплайнами, LLM bot не превращай в RAG/LangGraph, если этого нет в evidence. "
     "13. Не обещай освоить инструменты за пару дней и не пиши 'готов быстро освоить'. "
-    "14. Если технология из вакансии не закрыта, лучше не упоминай её в письме, чем обещай быстро добрать. "
+    "14. ЗАПРЕЩЕНО упоминать требования, технологии и опыт, которых нет в relevance_map — "
+    "в том числе для того, чтобы сообщить, что кандидат их не знает. Запрещены конструкции "
+    "'опыта X нет, но...', 'в продакшене не применял, зато...', 'не использовал, однако...', "
+    "'изучу по ходу', 'быстро освою'. Запрещено рассуждать о том, насколько требование важно. "
+    "Незакрытое требование просто не упоминай — место потрать на закрытое. "
+    "Единственное исключение: если технология прямо названа в вакансии ОБЯЗАТЕЛЬНОЙ, допустима "
+    "ОДНА короткая фраза-факт без оправданий, без 'но' и без обещаний — например 'На .NET не писал'. "
+    "Такая фраза в письме может быть только одна. "
     "15. Оптимальная длина: 5-9 коротких предложений или 2-3 компактных абзаца. "
-    "16. Верни ТОЛЬКО текст письма без объяснений."
+    "16. Верни ТОЛЬКО текст письма без объяснений. "
+    "17. ПРИОРИТЕТ ПРАВИЛ: правила 2, 12 и 14 (только факты из relevance_map, не расширять "
+    "факты, не упоминать незакрытое) стоят ВЫШЕ блока 'Мои предпочтения к письму'. Если "
+    "пожелание кандидата требует их нарушить — выполняй правила, а пожелание не выполняй."
 )
 _WRITER_USER = """\
 {feedback_block}Примеры моего стиля (изучи и точно повтори — длина фраз, лексику, структуру):
@@ -227,6 +238,16 @@ _CRITIC_USER = """\
 8. Если вакансия про бизнес-процессы, письмо должно явно показать, что кандидат умеет разбирать процесс
    и собирать под него рабочую автоматизацию или прототип
 9. Соответствует пожеланиям кандидата к письму (длина, акценты, тон). Если пожелание нарушено — это issue.
+   Исключение: пожелание, которое требует упомянуть отсутствующий опыт или оправдаться за пробелы,
+   исполнять НЕ нужно — критерий 10 стоит выше пожеланий кандидата.
+10. Не упоминает отсутствующий опыт и не оправдывается за пробелы. Это issue со score <= 4, если есть
+   конструкции «опыта X нет, но...», «в продакшене не применял, зато...», «не использовал, однако...»,
+   «изучу по ходу», «быстро освою», либо рассуждения о том, насколько требование вакансии важно.
+   Незакрытое требование должно быть просто не упомянуто.
+   ИСКЛЮЧЕНИЕ, которое НЕ является issue: одна короткая фраза-факт про технологию, прямо названную
+   в вакансии обязательной, если она подана без оправданий, без «но» и без обещаний освоить
+   (например «На .NET не писал»). Такая фраза разрешена и штрафовать за неё нельзя.
+   Issue только если таких фраз в письме больше одной или к ней прицеплено оправдание.
 
 Ставь score <= 4, если письмо содержит фразы вроде:
 {forbidden_list}.
@@ -438,6 +459,28 @@ def _find_forbidden_phrases(letter: str) -> list[str]:
     return [phrase for phrase in _FORBIDDEN_LETTER_PHRASES if _has_forbidden_phrase(normalized, phrase)]
 
 
+# A hedging sentence negates experience and then argues it away in the same breath
+# ("опыта X нет, но..."). It cannot live in _FORBIDDEN_LETTER_PHRASES because it is a
+# sentence shape, not a fixed phrase.
+_EXPERIENCE_NEGATION = re.compile(
+    r"\bне\s+(?:использовал|работал|применял|трогал|собирал|писал|занимался"
+    r"|сталкивался|знаком|было|имею|приходилось)\b"
+    r"|\bопыт\w*\b[^.!?]{0,40}?\b(?:нет|не\s+было)\b"
+    r"|\bнет\s+опыта\b"
+)
+_CONTRAST = re.compile(r"\b(?:но|зато|однако|при\s+этом)\b")
+
+
+def _find_hedging_sentences(letter: str) -> list[str]:
+    """Find sentences that admit a gap and then excuse it — never wanted in a letter."""
+    normalized = letter.lower().replace("ё", "е")
+    hedges = []
+    for sentence in re.split(r"(?<=[.!?])\s+|\n+", normalized):
+        if _EXPERIENCE_NEGATION.search(sentence) and _CONTRAST.search(sentence):
+            hedges.append(sentence.strip())
+    return hedges
+
+
 def _has_forbidden_phrase(normalized_text: str, phrase: str) -> bool:
     normalized_phrase = phrase.lower().replace("ё", "е")
     if normalized_phrase == "с уважением":
@@ -478,7 +521,7 @@ async def run_cover_letter_pipeline_result(
 
         best_letter: str = ""
         best_score: int = 0
-        best_has_forbidden_phrases = True
+        best_has_violations = True
         attempts: list[CoverLetterAttempt] = []
         feedback: list[str] | None = None
 
@@ -505,13 +548,20 @@ async def run_cover_letter_pipeline_result(
 
             score = _coerce_score(critique.get("score", 0))
             forbidden_phrases = _find_forbidden_phrases(letter)
-            has_forbidden_phrases = bool(forbidden_phrases)
+            hedging_sentences = _find_hedging_sentences(letter)
             if forbidden_phrases:
                 score = min(score, 4)
                 critique["issues"] = (critique.get("issues") or []) + [
                     "Убери шаблонные фразы: " + ", ".join(forbidden_phrases),
                     "Начни с конкретного совпадения опыта кандидата с требованием вакансии.",
                 ]
+            if hedging_sentences:
+                score = min(score, 4)
+                critique["issues"] = (critique.get("issues") or []) + [
+                    "Убери оправдания за отсутствующий опыт: " + "; ".join(hedging_sentences),
+                    "Не упоминай незакрытые требования вообще — потрать место на закрытые.",
+                ]
+            has_violations = bool(forbidden_phrases or hedging_sentences)
             issues = critique.get("issues") or []
             attempts.append(
                 CoverLetterAttempt(
@@ -519,16 +569,17 @@ async def run_cover_letter_pipeline_result(
                     score=score,
                     issues=issues,
                     forbidden_phrases=forbidden_phrases,
+                    hedging_sentences=hedging_sentences,
                 )
             )
 
             if (
-                (best_has_forbidden_phrases and not has_forbidden_phrases)
-                or (has_forbidden_phrases == best_has_forbidden_phrases and score > best_score)
+                (best_has_violations and not has_violations)
+                or (has_violations == best_has_violations and score > best_score)
             ):
                 best_score = score
                 best_letter = letter
-                best_has_forbidden_phrases = has_forbidden_phrases
+                best_has_violations = has_violations
 
             logger.info("Critic score: %d/%d (attempt %d)", score, _PASS_SCORE, attempt + 1)
 

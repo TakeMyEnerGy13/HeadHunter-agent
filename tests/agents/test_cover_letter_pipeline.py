@@ -82,3 +82,71 @@ def test_first_attempt_failure_still_raises(monkeypatch):
     _patch_steps(monkeypatch, fake_write, fake_critique)
     with pytest.raises(RuntimeError):
         _run()
+
+
+@pytest.mark.parametrize(
+    "letter",
+    [
+        "Опыта продаж нет, но в мире AI это менее болезненно.",
+        "RAG и LangChain не использовал в продакшене, но собирал кастомную оркестрацию.",
+        "Векторных баз в продакшене не было, но с RAG работал.",
+        "С CI/CD опыта нет, зато API-интеграции делал руками.",
+        "Kafka не трогал, однако очереди понимаю.",
+    ],
+)
+def test_hedging_detected(letter):
+    assert pipeline._find_hedging_sentences(letter)
+
+
+@pytest.mark.parametrize(
+    "letter",
+    [
+        "Собрал пайплайн из четырёх агентов, но главное — он измерим.",
+        "Не останавливаюсь на «модель отвечает», довожу до метрик.",
+        "Диагностировал исчерпание пула соединений PostgreSQL и закрыл его.",
+        "Держу в продакшене пять ботов с живыми пользователями.",
+        # The one allowed shape: a bare fact about a mandatory unmet requirement,
+        # with no contrastive clause attached. Must never be penalised.
+        "На .NET не писал.",
+        "Kafka не использовал. Держу в продакшене пять ботов и свои evals.",
+    ],
+)
+def test_hedging_not_flagged_for_clean_letters(letter):
+    assert pipeline._find_hedging_sentences(letter) == []
+
+
+def test_hedging_caps_score_and_adds_issue(monkeypatch):
+    async def fake_write(*args, **kwargs):
+        return "Опыта с Kafka нет, но брокеры я понимаю."
+
+    async def fake_critique(*args, **kwargs):
+        return {"score": 9, "issues": []}
+
+    _patch_steps(monkeypatch, fake_write, fake_critique)
+    result = _run()
+
+    assert result.best_score <= 4
+    assert result.attempts[0].hedging_sentences
+    assert any("оправд" in issue.lower() for issue in result.attempts[0].issues)
+
+
+def test_clean_letter_preferred_over_hedging_letter(monkeypatch):
+    letters = iter(
+        [
+            "Опыта с Kafka нет, но брокеры я понимаю.",
+            "Держу в продакшене пять ботов и свои evals.",
+        ]
+    )
+    scores = iter([9, 7])
+
+    async def fake_write(*args, **kwargs):
+        return next(letters)
+
+    async def fake_critique(*args, **kwargs):
+        return {"score": next(scores), "issues": []}
+
+    _patch_steps(monkeypatch, fake_write, fake_critique)
+    result = _run()
+
+    # The hedging letter scored higher before the penalty; the clean one must win.
+    assert result.best_letter == "Держу в продакшене пять ботов и свои evals."
