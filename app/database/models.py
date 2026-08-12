@@ -15,6 +15,7 @@ async def init_db():
                 resume_text TEXT,
                 keywords TEXT,
                 negative_keywords TEXT,
+                tg_channels TEXT,
                 is_active BOOLEAN DEFAULT 0
             )
         '''
@@ -32,6 +33,10 @@ async def init_db():
             await db.execute("ALTER TABLE user_settings ADD COLUMN preferences TEXT")
         except aiosqlite.OperationalError:
             pass
+        try:
+            await db.execute("ALTER TABLE user_settings ADD COLUMN tg_channels TEXT")
+        except aiosqlite.OperationalError:
+            pass
         await db.commit()
 
 
@@ -39,7 +44,7 @@ async def get_user_settings(user_id: int):
     """Получает настройки пользователя."""
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute(
-            "SELECT resume_text, keywords, negative_keywords, is_active, tone_samples, preferences FROM user_settings WHERE user_id = ?",
+            "SELECT resume_text, keywords, negative_keywords, tg_channels, is_active, tone_samples, preferences FROM user_settings WHERE user_id = ?",
             (user_id,),
         ) as cursor:
             row = await cursor.fetchone()
@@ -48,9 +53,10 @@ async def get_user_settings(user_id: int):
                     "resume_text": row[0],
                     "keywords": json.loads(row[1]) if row[1] else [],
                     "negative_keywords": json.loads(row[2]) if row[2] else [],
-                    "is_active": bool(row[3]),
-                    "tone_samples": row[4] or "",
-                    "preferences": row[5] or "",
+                    "tg_channels": json.loads(row[3]) if row[3] else [],
+                    "is_active": bool(row[4]),
+                    "tone_samples": row[5] or "",
+                    "preferences": row[6] or "",
                 }
             return None
 
@@ -60,6 +66,7 @@ async def update_user_settings(
     resume_text: str = None,
     keywords: list = None,
     negative_keywords: list = None,
+    tg_channels: list = None,
     is_active: bool = None,
     tone_samples: str = None,
     preferences: str = None,
@@ -83,6 +90,9 @@ async def update_user_settings(
             if negative_keywords is not None:
                 updates.append("negative_keywords = ?")
                 values.append(json.dumps(negative_keywords))
+            if tg_channels is not None:
+                updates.append("tg_channels = ?")
+                values.append(json.dumps(tg_channels))
             if is_active is not None:
                 updates.append("is_active = ?")
                 values.append(int(is_active))
@@ -101,11 +111,12 @@ async def update_user_settings(
             # Создаем нового пользователя
             kw_json = json.dumps(keywords) if keywords else "[]"
             negative_kw_json = json.dumps(negative_keywords) if negative_keywords else "[]"
+            tg_channels_json = json.dumps(tg_channels) if tg_channels is not None else None
             res_text = resume_text or ""
             active = int(is_active) if is_active is not None else 0
             await db.execute(
-                "INSERT INTO user_settings (user_id, resume_text, keywords, negative_keywords, is_active) VALUES (?, ?, ?, ?, ?)",
-                (user_id, res_text, kw_json, negative_kw_json, active),
+                "INSERT INTO user_settings (user_id, resume_text, keywords, negative_keywords, tg_channels, is_active) VALUES (?, ?, ?, ?, ?, ?)",
+                (user_id, res_text, kw_json, negative_kw_json, tg_channels_json, active),
             )
         await db.commit()
 
@@ -115,7 +126,7 @@ async def get_active_settings():
     users = []
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute(
-            "SELECT user_id, resume_text, keywords, negative_keywords, is_active, tone_samples, preferences FROM user_settings WHERE is_active = 1"
+            "SELECT user_id, resume_text, keywords, negative_keywords, tg_channels, is_active, tone_samples, preferences FROM user_settings WHERE is_active = 1"
         ) as cursor:
             rows = await cursor.fetchall()
             for row in rows:
@@ -125,9 +136,10 @@ async def get_active_settings():
                         "resume_text": row[1],
                         "keywords": json.loads(row[2]) if row[2] else [],
                         "negative_keywords": json.loads(row[3]) if row[3] else [],
-                        "is_active": bool(row[4]),
-                        "tone_samples": row[5] or "",
-                        "preferences": row[6] or "",
+                        "tg_channels": json.loads(row[4]) if row[4] else [],
+                        "is_active": bool(row[5]),
+                        "tone_samples": row[6] or "",
+                        "preferences": row[7] or "",
                     }
                 )
     return users
