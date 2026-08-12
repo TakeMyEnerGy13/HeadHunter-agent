@@ -2,10 +2,12 @@ import argparse
 import asyncio
 import hashlib
 import os
+import re
 import sqlite3
 from datetime import timezone
 from pathlib import Path
 from typing import Iterable
+from urllib.parse import urlparse
 
 import aiosqlite
 
@@ -29,6 +31,34 @@ def _split_csv(raw: str) -> list[str]:
 
 def _normalize_channel(channel: str) -> str:
     return channel.strip().lstrip("@")
+
+
+def normalize_channels(raw: str) -> list[str]:
+    channels = []
+    seen = set()
+
+    for item in _split_csv(raw):
+        parsed = urlparse(item)
+        if parsed.scheme or parsed.netloc:
+            if parsed.scheme != "https" or parsed.netloc.lower() != "t.me":
+                continue
+            if parsed.query or parsed.fragment:
+                continue
+            path_parts = [part for part in parsed.path.split("/") if part]
+            if len(path_parts) != 1:
+                continue
+            channel = path_parts[0]
+        else:
+            channel = _normalize_channel(item)
+
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{4,31}", channel):
+            continue
+        normalized = channel.lower()
+        if normalized not in seen:
+            seen.add(normalized)
+            channels.append(normalized)
+
+    return channels
 
 
 def _normalize_text(text: str) -> str:
@@ -67,6 +97,7 @@ async def init_source_db(db_path: str = DEFAULT_DB_PATH) -> None:
             """
             CREATE TABLE IF NOT EXISTS source_posts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
                 source TEXT NOT NULL,
                 channel TEXT NOT NULL,
                 message_id INTEGER NOT NULL,
@@ -77,24 +108,60 @@ async def init_source_db(db_path: str = DEFAULT_DB_PATH) -> None:
                 text_hash TEXT NOT NULL,
                 is_processed INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(source, channel, message_id)
+                UNIQUE(user_id, source, channel, message_id)
             )
             """
         )
+        async with db.execute("PRAGMA table_info(source_posts)") as cursor:
+            columns = {row[1] for row in await cursor.fetchall()}
+        if "user_id" not in columns:
+            await db.execute("ALTER TABLE source_posts RENAME TO source_posts_legacy")
+            await db.execute(
+                """
+                CREATE TABLE source_posts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    source TEXT NOT NULL,
+                    channel TEXT NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    posted_at TEXT,
+                    title TEXT,
+                    text TEXT NOT NULL,
+                    url TEXT,
+                    text_hash TEXT NOT NULL,
+                    is_processed INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, source, channel, message_id)
+                )
+                """
+            )
+            await db.execute(
+                """
+                INSERT INTO source_posts (
+                    id, user_id, source, channel, message_id, posted_at, title, text,
+                    url, text_hash, is_processed, created_at
+                )
+                SELECT id, 0, source, channel, message_id, posted_at, title, text,
+                       url, text_hash, is_processed, created_at
+                FROM source_posts_legacy
+                """
+            )
+            await db.execute("DROP TABLE source_posts_legacy")
         await db.commit()
 
 
-async def save_post(post: JobPost, db_path: str = DEFAULT_DB_PATH) -> bool:
+async def save_post(user_id: int, post: JobPost, db_path: str = DEFAULT_DB_PATH) -> bool:
     await init_source_db(db_path)
     async with aiosqlite.connect(db_path) as db:
         cursor = await db.execute(
             """
             INSERT OR IGNORE INTO source_posts (
-                source, channel, message_id, posted_at, title, text, url, text_hash
+                user_id, source, channel, message_id, posted_at, title, text, url, text_hash
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
+                user_id,
                 post.source,
                 post.channel,
                 post.message_id,
@@ -145,6 +212,7 @@ async def fetch_channel_posts(
     session_name: str,
     api_id: int,
     api_hash: str,
+    user_id: int = 0,
     verbose: bool = True,
 ) -> list[ChannelFetchStats]:
     try:
@@ -176,7 +244,7 @@ async def fetch_channel_posts(
                     filtered += 1
                     continue
 
-                if await save_post(post, db_path):
+                if await save_post(user_id, post, db_path):
                     saved += 1
                     if verbose:
                         print(f"[saved] @{channel} #{post.message_id}: {post.title}")
@@ -231,6 +299,7 @@ def print_recent_posts(db_path: str, limit: int) -> int:
             """
             SELECT channel, message_id, posted_at, title, url
             FROM source_posts
+            WHERE user_id = 0
             ORDER BY id DESC
             LIMIT ?
             """,
@@ -249,7 +318,9 @@ def print_recent_posts(db_path: str, limit: int) -> int:
     return 0
 
 
-async def get_recent_posts(db_path: str = DEFAULT_DB_PATH, limit: int = 10) -> list[SavedPostPreview]:
+async def get_recent_posts(
+    user_id: int, db_path: str = DEFAULT_DB_PATH, limit: int = 10
+) -> list[SavedPostPreview]:
     path = Path(db_path)
     if not path.exists():
         return []
@@ -260,10 +331,11 @@ async def get_recent_posts(db_path: str = DEFAULT_DB_PATH, limit: int = 10) -> l
             """
             SELECT channel, message_id, posted_at, title, url
             FROM source_posts
+            WHERE user_id = ?
             ORDER BY id DESC
             LIMIT ?
             """,
-            (limit,),
+            (user_id, limit),
         ) as cursor:
             rows = await cursor.fetchall()
 
@@ -281,13 +353,16 @@ async def get_recent_posts(db_path: str = DEFAULT_DB_PATH, limit: int = 10) -> l
 
 async def fetch_from_config(
     channels: list[str] | None = None,
+    user_id: int = 0,
     keywords: list[str] | None = None,
     negative_keywords: list[str] | None = None,
     limit: int = 20,
     db_path: str = DEFAULT_DB_PATH,
     verbose: bool = False,
 ) -> list[ChannelFetchStats]:
-    resolved_channels = channels or [_normalize_channel(channel) for channel in _split_csv(TG_JOB_CHANNELS)]
+    resolved_channels = (
+        channels if channels is not None else [_normalize_channel(channel) for channel in _split_csv(TG_JOB_CHANNELS)]
+    )
     resolved_keywords = keywords if keywords is not None else _split_csv(TG_SOURCE_KEYWORDS)
     resolved_negative = (
         negative_keywords if negative_keywords is not None else _split_csv(TG_SOURCE_NEGATIVE_KEYWORDS)
@@ -303,6 +378,7 @@ async def fetch_from_config(
         session_name=TG_SESSION_NAME,
         api_id=api_id,
         api_hash=api_hash,
+        user_id=user_id,
         verbose=verbose,
     )
 
