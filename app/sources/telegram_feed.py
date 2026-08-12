@@ -325,6 +325,8 @@ async def get_recent_posts(
     if not path.exists():
         return []
 
+    await init_source_db(db_path)
+
     async with aiosqlite.connect(db_path) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -428,6 +430,7 @@ def main() -> int:
         print("--limit must be >= 1")
         return 1
     if args.list_saved:
+        asyncio.run(init_source_db(args.db))
         return print_recent_posts(args.db, args.limit)
 
     try:
