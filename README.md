@@ -77,6 +77,7 @@ Telegram-бот, который помогает искать вакансии �
 TG_API_ID=your_telegram_api_id_here
 TG_API_HASH=your_telegram_api_hash_here
 TG_SESSION_NAME=job_bot_tg_source
+# Optional defaults for the standalone CLI reader only:
 TG_JOB_CHANNELS=ods_jobs,some_ai_jobs_channel
 TG_SOURCE_KEYWORDS=python,ai,llm,qa automation
 TG_SOURCE_NEGATIVE_KEYWORDS=senior,lead,relocation only
@@ -100,12 +101,13 @@ python -m app.sources.telegram_feed --channels ods_jobs --keywords "python,llm" 
 python -m app.sources.telegram_feed --list-saved --limit 10
 ```
 
-В Telegram-меню есть две кнопки:
+В Telegram-меню есть три кнопки:
 
-- `📡 Скан TG` — читает каналы из `TG_JOB_CHANNELS`, фильтрует по текущим ключам и исключениям пользователя, сохраняет новые посты.
+- `⚙️ Настроить каналы` — сохраняет личный список публичных каналов пользователя. Поддерживаются `@channel`, `channel` и `https://t.me/channel`.
+- `📡 Скан TG` — читает только личные каналы пользователя, фильтрует по его текущим ключам и исключениям, сохраняет новые посты.
 - `🗂 TG посты` — показывает последние сохранённые TG-посты.
 
-Первую авторизацию Telethon лучше сделать через CLI, потому что Telegram может запросить телефон и код.
+`TG_API_ID`, `TG_API_HASH` и `TG_SESSION_NAME` остаются конфигурацией развёртывания для Telethon. Список каналов для bot-flow задаётся в самом боте и не берётся из `TG_JOB_CHANNELS`. Первую авторизацию Telethon лучше сделать через CLI, потому что Telegram может запросить телефон и код.
 
 ### Память и настройки
 

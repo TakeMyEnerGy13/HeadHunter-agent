@@ -9,7 +9,7 @@ from aiogram.fsm.state import State, StatesGroup
 
 from app.agents.writer import WriterAgent, WriterAgentError
 from app.database.models import get_user_settings, update_user_settings
-from app.sources.telegram_feed import fetch_from_config, get_recent_posts
+from app.sources.telegram_feed import fetch_from_config, get_recent_posts, normalize_channels
 from app.utils.fetcher import fetch_job_text
 
 logger = logging.getLogger(__name__)
@@ -24,6 +24,7 @@ class UserState(StatesGroup):
     waiting_for_negative_keywords = State()
     waiting_for_tone_samples = State()
     waiting_for_preferences = State()
+    waiting_for_tg_channels = State()
     waiting_for_job_posting = State()
 
 # Создаем клавиатуру (меню) - добавили новые кнопки!
@@ -42,6 +43,7 @@ def get_tg_sources_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📡 Скан TG"), KeyboardButton(text="🗂 TG посты")],
+            [KeyboardButton(text="⚙️ Настроить каналы")],
             [KeyboardButton(text="⬅️ Назад")],
         ],
         resize_keyboard=True,
@@ -80,6 +82,36 @@ async def cmd_start(message: Message):
 @router.message(F.text == "📡 TG вакансии")
 async def show_tg_sources_menu(message: Message):
     await message.answer("Раздел Telegram-вакансий:", reply_markup=get_tg_sources_keyboard())
+
+
+@router.message(F.text == "⚙️ Настроить каналы")
+async def ask_for_tg_channels(message: Message, state: FSMContext):
+    await message.answer(
+        "Отправь публичные Telegram-каналы через запятую. "
+        "Подойдут @channel, channel или https://t.me/channel. "
+        "Чтобы очистить список, отправь: <code>-</code>",
+        parse_mode="HTML",
+    )
+    await state.set_state(UserState.waiting_for_tg_channels)
+
+
+@router.message(StateFilter(UserState.waiting_for_tg_channels))
+async def save_tg_channels(message: Message, state: FSMContext):
+    raw = (message.text or "").strip()
+    channels = [] if raw == "-" else normalize_channels(raw)
+    if raw != "-" and not channels:
+        await message.answer(
+            "Не нашёл корректных публичных каналов. "
+            "Используй @channel, channel или https://t.me/channel."
+        )
+        return
+
+    await update_user_settings(message.from_user.id, tg_channels=channels)
+    if channels:
+        await message.answer(f"✅ Telegram-каналы сохранены: {', '.join(f'@{channel}' for channel in channels)}")
+    else:
+        await message.answer("✅ Список Telegram-каналов очищен.")
+    await state.clear()
 
 
 @router.message(F.text == "⚙️ Настройки")
@@ -256,18 +288,25 @@ async def save_preferences(message: Message, state: FSMContext):
 
 @router.message(F.text == "📡 Скан TG")
 async def scan_telegram_sources(message: Message):
-    """Запускает ручной scan Telegram job channels из настроек .env."""
+    """Запускает ручной scan личных Telegram job channels пользователя."""
     settings = await get_user_settings(message.from_user.id)
     if not settings:
         await message.answer("Настройки не найдены. Нажми /start")
         return
 
-    keywords = settings.get("keywords") or None
-    negative_keywords = settings.get("negative_keywords") or None
+    channels = settings["tg_channels"]
+    if not channels:
+        await message.answer("Сначала добавь каналы: 📡 TG вакансии → ⚙️ Настроить каналы.")
+        return
+
+    keywords = settings["keywords"]
+    negative_keywords = settings["negative_keywords"]
     status_msg = await message.answer("📡 Сканирую Telegram-каналы...")
 
     try:
         stats = await fetch_from_config(
+            channels=channels,
+            user_id=message.from_user.id,
             keywords=keywords,
             negative_keywords=negative_keywords,
             limit=30,
@@ -285,7 +324,7 @@ async def scan_telegram_sources(message: Message):
 
     await status_msg.delete()
     if not stats:
-        await message.answer("Telegram-каналы не настроены. Проверь TG_JOB_CHANNELS в .env.")
+        await message.answer("В выбранных каналах нет доступных сообщений.")
         return
 
     saved_total = sum(item.saved for item in stats)
@@ -311,7 +350,7 @@ async def scan_telegram_sources(message: Message):
 @router.message(F.text == "🗂 TG посты")
 async def show_saved_telegram_posts(message: Message):
     """Показывает последние сохранённые Telegram job posts."""
-    posts = await get_recent_posts(limit=10)
+    posts = await get_recent_posts(user_id=message.from_user.id, limit=10)
     if not posts:
         await message.answer("Сохранённых TG-постов пока нет. Нажми «📡 Скан TG».")
         return
